@@ -129,7 +129,7 @@ class TWAKExecutor:
 
     async def compete_register(self) -> dict[str, Any]:
         """Register wallet for BNB Hack competition."""
-        return await self._run(["twak", "compete", "register", "--chain", "bsc", "--json"])
+        return await self._run(["twak", "compete", "register", "--json"])
 
     async def get_portfolio(self) -> dict[str, Any]:
         """Get full portfolio overview."""
