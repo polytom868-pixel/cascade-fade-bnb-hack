@@ -45,21 +45,16 @@ def _split_across_basket(amount: float, basket: List[str]) -> List[Tuple[str, fl
 
 
 class DecisionEngine:
-    def __init__(self, twak_client, portfolio: Portfolio, risk: RiskGuard):
+    def __init__(self, twak_client, portfolio: Portfolio, risk: RiskGuard, signal_engine):
         self.twak = twak_client
         self.portfolio = portfolio
         self.risk = risk
+        self.signal_engine = signal_engine
         self._last_buy_tick: Dict[str, float] = {}
 
     async def run_cycle(self, initial_cash: float, price_map: dict[str, float]) -> dict[str, Any]:
         """Run one full decision cycle: build signal/bals then evaluate."""
-        signal_result = {
-            "top_narrative": "",
-            "top_verdict": "AVOID",
-            "top_conviction": 0,
-            "regime": "TRANSITION",
-            "conviction_cap": 75,
-        }
+        signal_result = await self.signal_engine.evaluate()
         balances = {
             CASH_CURRENCY: initial_cash,
             "usd_value": initial_cash,

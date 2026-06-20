@@ -68,6 +68,7 @@ class Agent:
             twak_client=self.twak,
             portfolio=self.portfolio,
             risk=self.risk_manager,
+            signal_engine=self.signal_engine,
         )
 
         self._start_ts = datetime.now(timezone.utc)
