@@ -1,5 +1,6 @@
 """Narrative-basket decision engine: allocates across token baskets."""
 import logging
+import os
 import datetime
 from typing import Dict, List, Tuple, Any
 from src.config import (
@@ -168,7 +169,7 @@ class DecisionEngine:
             if now - last < TRADE_INTERVAL_MINUTES * 60:
                 actions["rejections"].append((token, "cooldown"))
                 continue
-            price = price_map.get(token, 0.0)
+            price = price_map.get(token, 0.0) or 1.0
             units = amount / max(price, 1e-9)
             if amount < MIN_TRADE_SIZE_USD:
                 actions["rejections"].append((token, f"amt ${amount:.2f} < min ${MIN_TRADE_SIZE_USD}"))
@@ -184,9 +185,11 @@ class DecisionEngine:
             self.risk.position_size(amount, balances.get("total_value", 0))
             self.portfolio.add(token, price, units)
             self._last_buy_tick[token] = now
-            # TWAK swap: buy token with USDT
-            swap_result = await self.twak.swap(amount, CASH_CURRENCY, token, slippage=0.5)
-            tx_hash = swap_result.get("tx_hash") or (swap_result.get("data", {}).get("txHash") if isinstance(swap_result.get("data"), dict) else None)
+            if os.getenv("AGENT_MODE", "paper") == "paper":
+                tx_hash = f"0xPAPER_{token}_{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}"
+            else:
+                swap_result = await self.twak.swap(amount, CASH_CURRENCY, token, slippage=0.5)
+                tx_hash = swap_result.get("tx_hash") or (swap_result.get("data", {}).get("txHash") if isinstance(swap_result.get("data"), dict) else None)
             log_trade("BUY", token, units, price, amount, tx_hash=tx_hash)
             actions["buys"].append({"token": token, "units": units, "price": price, "value": amount, "tx_hash": tx_hash})
             logger.info("BUY %s $%.2f tx=%s", token, amount, tx_hash)
