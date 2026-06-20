@@ -60,7 +60,7 @@ class DecisionEngine:
             "usd_value": initial_cash,
             "total_value": initial_cash,
         }
-        return await self.evaluate(signal_result, balances)
+        return await self.evaluate(signal_result, balances, price_map)
 
     def _heartbeat_buy(self, token: str, amount: float):
         price = self.twak.price(f"{token}/{CASH_CURRENCY}")
@@ -70,7 +70,7 @@ class DecisionEngine:
         log_trade("BUY", token, units, price, amount)
         logger.info("Heartbeat buy %s $%.2f", token, amount)
 
-    async def evaluate(self, signal_result: dict, balances: dict) -> dict:
+    async def evaluate(self, signal_result: dict, balances: dict, price_map: dict[str, float]) -> dict:
         actions = {"buys": [], "sells": [], "holds": [], "rejections": []}
         action_notes = []
 
@@ -134,7 +134,7 @@ class DecisionEngine:
                 actions["holds"].append(position_token)
                 continue
             pos = self.portfolio.positions[position_token]
-            price = self.twak.price(f"{position_token}/{CASH_CURRENCY}")
+            price = price_map.get(position_token, 0.0)
             value = pos["units"] * price
             if value < PORTFOLIO_FLOOR_USD:
                 actions["holds"].append(position_token)
@@ -168,7 +168,7 @@ class DecisionEngine:
             if now - last < TRADE_INTERVAL_MINUTES * 60:
                 actions["rejections"].append((token, "cooldown"))
                 continue
-            price = self.twak.price(f"{token}/{CASH_CURRENCY}")
+            price = price_map.get(token, 0.0)
             units = amount / max(price, 1e-9)
             if amount < PORTFOLIO_FLOOR_USD:
                 actions["rejections"].append((token, f"amt ${amount:.2f} < min ${MIN_TRADE_SIZE_USD}"))
