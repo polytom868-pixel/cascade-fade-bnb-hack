@@ -72,6 +72,46 @@ class RiskGuard:
 
         return {"needed": True, "reason": "no trade in 22h+"}
 
+    # ---------------------------------------------------------------------------
+    # Aliases for decision.py
+    # ---------------------------------------------------------------------------
+
+    async def circuit_breaker(self, portfolio_value: float) -> tuple[bool, str]:
+        """Alias for check_drawdown — used by decision.py.
+
+        Returns (ok, message) tuple matching what decision.py expects.
+        Drawdown is inferred as (peak - current) / peak using the provided portfolio_value.
+        """
+        peak_value = self.portfolio.peak_value if hasattr(self.portfolio, "peak_value") else portfolio_value
+        drawdown_pct = max(0.0, (peak_value - portfolio_value) / peak_value) if peak_value > 0 else 0.0
+        result = await self.check_drawdown({"drawdown_pct": drawdown_pct})
+        if result["safe"]:
+            return True, "drawdown OK"
+        return False, f"drawdown kill: {drawdown_pct:.2%} >= {MAX_DRAWDOWN_PCT:.2%}"
+
+    async def floor_guard(self, total_value: float) -> str:
+        """Alias for check_portfolio_floor — used by decision.py.
+
+        Returns message string (empty if safe).
+        """
+        result = await self.check_portfolio_floor({"total": total_value})
+        if result["safe"]:
+            return ""
+        return f"portfolio floor breach: ${total_value:.2f} < ${PORTFOLIO_FLOOR_USD}"
+
+    def exposure_check(self, exposure: float, total_value: float) -> tuple[bool, str]:
+        """Check if total exposure exceeds 90% of portfolio value.
+
+        Returns (ok, message) tuple matching what decision.py expects.
+        """
+        if total_value <= 0:
+            return True, ""
+        exposure_ratio = exposure / total_value
+        MAX_EXPOSURE_RATIO = 0.90
+        if exposure_ratio > MAX_EXPOSURE_RATIO:
+            return False, f"exposure {exposure_ratio:.2%} > {MAX_EXPOSURE_RATIO:.2%} of portfolio"
+        return True, ""
+
     def position_size(self, cash: float, portfolio_value: float) -> float:
         """Compute max position size for a new trade.
 
