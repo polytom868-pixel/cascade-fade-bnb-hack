@@ -146,6 +146,7 @@ class Agent:
         for tokens in NARRATIVE_BASKETS.values():
             symbols_needed.update(tokens)
         symbols_needed.add(RISK_CURRENCY)
+        symbols_needed.add("BNB")  # need BNB price for cash valuation
 
         price_map: dict[str, float] = {}
         if symbols_needed:
