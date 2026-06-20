@@ -92,7 +92,7 @@ class Quoter:
         self.w3 = Web3(Web3.HTTPProvider(rpc_url))
         if not self.w3.is_connected():
             logger.error("Cannot connect to BSC RPC: %s", rpc_url)
-        self.quoter = self.w3.eth.contract(address=PCS_V3_QUOTER_V2, abi=QUOTER_V2_ABI)
+        self.quoter = self.w3.eth.contract(address=Web3.to_checksum_address(PCS_V3_QUOTER_V2), abi=QUOTER_V2_ABI)
 
     def estimate_slippage_single(
         self,
@@ -179,7 +179,7 @@ class Quoter:
         try:
             if token_addr is None or token_addr.upper() == WBNB.upper():
                 # BNB balance
-                bal = self.w3.eth.get_balance(address)
+                bal = self.w3.eth.get_balance(Web3.to_checksum_address(address))
                 return bal / 1e18
             else:
                 # Minimal ERC-20 balanceOf ABI
@@ -192,8 +192,8 @@ class Quoter:
                         "type": "function",
                     }
                 ]
-                token = self.w3.eth.contract(address=token_addr, abi=erc20_abi)
-                bal = token.functions.balanceOf(address).call()
+                token = self.w3.eth.contract(address=Web3.to_checksum_address(token_addr), abi=erc20_abi)
+                bal = token.functions.balanceOf(Web3.to_checksum_address(address)).call()
                 return bal / 1e18
         except Exception as exc:
             logger.warning("Balance fetch failed for %s %s: %s", address, token_addr, exc)

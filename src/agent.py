@@ -21,7 +21,9 @@ from src.config import (
     ALLOWLIST,
     STOP_LOSS_PCT,
     TAKE_PROFIT_PCT,
+    NARRATIVE_BASKETS,
 )
+from src.decision import CASH_CURRENCY, RISK_CURRENCY
 from src.decision import DecisionEngine
 from src.log import TradeLogger
 from src.portfolio import Portfolio
@@ -138,16 +140,20 @@ class Agent:
         start = datetime.now(timezone.utc)
         logger.info("--- Cycle %d | %s ---", self._cycle_count, start.isoformat())
 
-        # Fetch current prices for all held symbols before running decisions
-        price_map: dict[str, float] = {}
+        # Fetch prices for ALL relevant tokens: held + basket + risk currency
         held_symbols = await self.portfolio.get_held_symbols()
-        for sym in held_symbols:
+        symbols_needed: set[str] = set(held_symbols)
+        for tokens in NARRATIVE_BASKETS.values():
+            symbols_needed.update(tokens)
+        symbols_needed.add(RISK_CURRENCY)
+
+        price_map: dict[str, float] = {}
+        if symbols_needed:
             try:
-                price = self.twak.price(f"{sym}/USDT")
-                if price > 0:
-                    price_map[sym] = price
-            except Exception:
-                pass
+                quotes = await self.cmc.get_bulk_quotes({s: "" for s in symbols_needed})
+                price_map = {s: q.get("price", 0.0) for s, q in quotes.items()}
+            except Exception as exc:
+                logger.warning("CMC bulk quotes failed: %s", exc)
 
         # P1 #4: stop/take-profit check — generate forced sells before running decisions
         forced_sells = []
@@ -166,11 +172,26 @@ class Agent:
                 logger.info("TAKE-PROFIT triggered: %s price=%.4f >= take=%.4f", sym, current_price, take_price)
                 forced_sells.append({"token": sym, "reason": "take_profit", "price": current_price})
 
+        cash = await self.portfolio.get_cash_balance()
         try:
-            summary = await self.decision.run_cycle(self.initial_cash, price_map)
+            summary = await self.decision.run_cycle(cash, price_map)
         except Exception as exc:
             logger.exception("Cycle %d failed: %s", self._cycle_count, exc)
             summary = {"error": str(exc), "actions": {"buys": [], "sells": [], "holds": [], "rejections": []}, "notes": []}
+
+        # Execute forced sells (stop-loss / take-profit)
+        for sell in forced_sells:
+            sym = sell["token"]
+            price = sell["price"]
+            pos = self.portfolio.positions.get(sym)
+            units = pos["units"] if pos else 0.0
+            if self.mode != "paper":
+                swap_result = await self.twak.swap(units, sym, CASH_CURRENCY, slippage=0.5)
+                tx_hash = swap_result.get("tx_hash") or ""
+            else:
+                tx_hash = f"0xSELL_PAPER_{sym}"
+            await self.portfolio.close_position(sym, price, tx_hash)
+            logger.info("Executed forced sell: %s reason=%s price=%.4f tx=%s", sym, sell["reason"], price, tx_hash)
 
         # Prepend forced sells to the decision's sell actions
         if forced_sells:

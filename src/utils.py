@@ -4,6 +4,8 @@ import logging
 import re
 from typing import Any
 
+import aiosqlite
+
 logger = logging.getLogger("cascadefade")
 
 
@@ -68,7 +70,7 @@ async def retry_async(
     exceptions: tuple[type[Exception], ...] = (Exception,),
 ) -> Any:
     """Retry an async coroutine with exponential backoff."""
-    last_exc = None
+    last_exc: BaseException | None = None
     for attempt in range(retries + 1):
         try:
             return await coro_factory()
@@ -79,3 +81,15 @@ async def retry_async(
                 logger.warning("Retry %d/%d after %.1fs: %s", attempt + 1, retries, wait, exc)
                 await asyncio.sleep(wait)
     raise last_exc
+
+
+async def ensure_db(db: aiosqlite.Connection | None, db_path: str) -> aiosqlite.Connection:
+    """Return a live aiosqlite connection, reconnecting if necessary."""
+    if db is not None:
+        try:
+            await db.execute("SELECT 1")
+            return db
+        except (aiosqlite.Error, ValueError):
+            pass
+    new_db: aiosqlite.Connection = await aiosqlite.connect(db_path, timeout=60.0)
+    return new_db

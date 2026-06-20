@@ -246,4 +246,3 @@ CMC_SYMBOL_TO_ID: dict[str, int] = {}
 
 # Aliases for backward compatibility
 ALLOWLIST_TO_TOKEN_ADDRESS = ALLOWLIST
-REGIME_SIZING = {"RISK_ON": 1.0, "TRANSITION": 0.6, "RISK_OFF": 0.3}

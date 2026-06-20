@@ -89,8 +89,8 @@ def get_contract_function(w3: Web3, contract) -> callable:
     try:
         fn = contract.functions.register()
         # Verify it can be built (will fail if wrong signature)
-        fn.build_transaction({"from": WALLET_ADDRESS})
-        return fn, "register()"
+        fn.build_transaction({"from": Web3.to_checksum_address(WALLET_ADDRESS)})  # type: ignore
+        return fn, "register()"  # type: ignore[reportGeneralTypeIssues,reportAttributeAccessIssue]
     except Exception:
         pass
 
@@ -144,7 +144,7 @@ def register_agent():
     print(f"    Wallet: {WALLET_ADDRESS}")
 
     # Verify wallet balance
-    balance = w3.eth.get_balance(WALLET_ADDRESS)
+    balance = w3.eth.get_balance(Web3.to_checksum_address(WALLET_ADDRESS))
     balance_bnb = w3.from_wei(balance, "ether")
     print(f"    Balance: {balance_bnb:.6f} BNB")
 
@@ -167,7 +167,7 @@ def register_agent():
 
     # Build transaction
     print("\n[5] Building transaction...")
-    nonce = w3.eth.get_transaction_count(WALLET_ADDRESS)
+    nonce = w3.eth.get_transaction_count(Web3.to_checksum_address(WALLET_ADDRESS))
     gas_price = w3.eth.gas_price
 
     tx_params = {
@@ -224,8 +224,8 @@ def register_agent():
     print(f"{'=' * 60}")
     try:
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-        if receipt.status == 1:
-            print(f"  SUCCESS! Transaction confirmed in block {receipt.blockNumber}")
+        if receipt.get("status") == 1:
+            print(f"  SUCCESS! Transaction confirmed in block {receipt.get('blockNumber')}")
         else:
             print("  WARNING: Transaction failed on-chain!")
     except Exception as e:

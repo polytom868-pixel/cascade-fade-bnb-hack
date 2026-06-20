@@ -7,7 +7,28 @@ from typing import Any
 import aiosqlite
 
 from src.config import DB_PATH, ALLOWLIST, HEARTBEAT_SIZE_USD, MAX_POSITION_PCT
-from src.utils import retry_async
+from src.utils import ensure_db, retry_async
+
+STOP_LOSS_PCT = 0.05
+TAKE_PROFIT_PCT = 0.10
+
+
+def _compute_stop_take(entry_price: float) -> tuple[float, float]:
+    """Compute stop-loss and take-profit prices from entry price."""
+    stop = entry_price * (1 - STOP_LOSS_PCT)
+    take = entry_price * (1 + TAKE_PROFIT_PCT)
+    return round(stop, 6), round(take, 6)
+
+
+def _sum_position_values(positions: list[dict], price_map: dict) -> float:
+    """Sum the USD value of positions using quote prices from price_map."""
+    total = 0.0
+    for pos in positions:
+        sym = pos["symbol"]
+        quote = price_map.get(sym, {})
+        price = quote.get("price", 0.0) or 0.0
+        total += pos["amount"] * price
+    return total
 
 logger = logging.getLogger("cascadefade.portfolio")
 
@@ -23,21 +44,18 @@ class Portfolio:
         self.positions: dict[str, dict[str, Any]] = {}
 
     async def _connect(self) -> aiosqlite.Connection:
-        if self._db is not None:
-            try:
-                await self._db.execute("SELECT 1")
-                return self._db
-            except (aiosqlite.Error, ValueError):
-                pass
-        self._db = await aiosqlite.connect(self.db_path, timeout=60.0)
-        await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("PRAGMA synchronous=NORMAL")
-        await self._db.execute("PRAGMA foreign_keys=ON")
-        await self._ensure_schema()
+        new_db = await ensure_db(self._db, self.db_path)
+        if new_db is not self._db:
+            self._db = new_db
+            await self._db.execute("PRAGMA journal_mode=WAL")
+            await self._db.execute("PRAGMA synchronous=NORMAL")
+            await self._db.execute("PRAGMA foreign_keys=ON")
+            await self._ensure_schema()
         return self._db
 
     async def _ensure_schema(self) -> None:
         # Shared schema — same tables as cache.py
+        db = await self._connect()
         sql = """
         CREATE TABLE IF NOT EXISTS trades (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,8 +100,8 @@ class Portfolio:
         CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);
         CREATE INDEX IF NOT EXISTS idx_portfolio_ts ON portfolio_snapshots(ts);
         """
-        await self._db.executescript(sql)
-        await self._db.commit()
+        await db.executescript(sql)
+        await db.commit()
 
     def total_exposure(self) -> float:
         """Total USD value of all open positions (using entry prices)."""
@@ -116,7 +134,8 @@ class Portfolio:
         if not pos:
             return 0.0
         entry = pos.get("entry_price", 0.0)
-        return entry * (1 - 0.05)  # 5% stop-loss from entry
+        stop, _ = _compute_stop_take(entry)
+        return stop
 
     def get_take_price(self, symbol: str) -> float:
         """Return take-profit price for a position, or 0 if not found."""
@@ -124,7 +143,8 @@ class Portfolio:
         if not pos:
             return 0.0
         entry = pos.get("entry_price", 0.0)
-        return entry * (1 + 0.10)  # 10% take-profit from entry
+        _, take = _compute_stop_take(entry)
+        return take
 
     async def sync_position_to_db(self, symbol: str) -> None:
         """Persist an in-memory position to the DB (called async after swap)."""

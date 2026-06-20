@@ -63,14 +63,6 @@ class DecisionEngine:
         }
         return await self.evaluate(signal_result, balances, price_map)
 
-    def _heartbeat_buy(self, token: str, amount: float):
-        price = self.twak.price(f"{token}/{CASH_CURRENCY}")
-        units = amount / max(price, 1e-9)
-        self.risk.position_size(units, price, "heartbeat")
-        self.portfolio.add(token, units, price)
-        log_trade("BUY", token, units, price, amount)
-        logger.info("Heartbeat buy %s $%.2f", token, amount)
-
     async def evaluate(self, signal_result: dict, balances: dict, price_map: dict[str, float]) -> dict:
         actions = {"buys": [], "sells": [], "holds": [], "rejections": []}
         action_notes = []
@@ -146,8 +138,11 @@ class DecisionEngine:
                 continue
             # TWAK swap: sell token -> USDT
             units = pos["units"]
-            swap_result = await self.twak.swap(units, position_token, CASH_CURRENCY, slippage=0.5)
-            tx_hash = swap_result.get("tx_hash") or (swap_result.get("data", {}).get("txHash") if isinstance(swap_result.get("data"), dict) else None)
+            if os.getenv("AGENT_MODE", "paper") == "paper":
+                tx_hash = f"0xSELL_PAPER_{position_token}"
+            else:
+                swap_result = await self.twak.swap(units, position_token, CASH_CURRENCY, slippage=0.5)
+                tx_hash = swap_result.get("tx_hash") or (swap_result.get("data", {}).get("txHash") if isinstance(swap_result.get("data"), dict) else None)
             self.portfolio.remove(position_token)
             log_trade("SELL", position_token, units, price, value, tx_hash=tx_hash)
             actions["sells"].append({"token": position_token, "units": units, "price": price, "value": value, "tx_hash": tx_hash})
@@ -183,6 +178,7 @@ class DecisionEngine:
                 actions["rejections"].append((token, buy_msg))
                 continue
             self.risk.position_size(amount, balances.get("total_value", 0))
+            # Add to in-memory portfolio first
             self.portfolio.add(token, price, units)
             self._last_buy_tick[token] = now
             if os.getenv("AGENT_MODE", "paper") == "paper":
@@ -190,6 +186,8 @@ class DecisionEngine:
             else:
                 swap_result = await self.twak.swap(amount, CASH_CURRENCY, token, slippage=0.5)
                 tx_hash = swap_result.get("tx_hash") or (swap_result.get("data", {}).get("txHash") if isinstance(swap_result.get("data"), dict) else None)
+            # Sync to DB after tx_hash is known
+            await self.portfolio.sync_position_to_db(token)
             log_trade("BUY", token, units, price, amount, tx_hash=tx_hash)
             actions["buys"].append({"token": token, "units": units, "price": price, "value": amount, "tx_hash": tx_hash})
             logger.info("BUY %s $%.2f tx=%s", token, amount, tx_hash)

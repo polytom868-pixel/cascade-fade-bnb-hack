@@ -6,6 +6,7 @@ from typing import Any
 import aiosqlite
 
 from src.config import DB_PATH
+from src.utils import ensure_db
 
 CACHE_TTL_SECONDS = 300  # 5 minutes
 
@@ -18,8 +19,9 @@ class Cache:
         self._db: aiosqlite.Connection | None = None  # Instance variable, not class-level
 
     async def _connect(self) -> aiosqlite.Connection:
-        if self._db is None or self._db.closed:
-            self._db = await aiosqlite.connect(self._db_path, timeout=60.0)
+        new_db = await ensure_db(self._db, self._db_path)
+        if new_db is not self._db:
+            self._db = new_db
             await self._db.execute("PRAGMA journal_mode=WAL")
             await self._db.execute("PRAGMA synchronous=NORMAL")
             await self._db.execute("PRAGMA foreign_keys=ON")

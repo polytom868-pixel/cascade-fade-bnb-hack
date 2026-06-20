@@ -10,13 +10,13 @@ from src.cache import Cache
 from src.cmc_client import CMCClient
 from src.config import ALLOWLIST
 from src.quoter import Quoter
-from src.signal import SignalEngine
+from src.signal import SignalEngineClass
 
 
 async def main() -> None:
     cache = Cache()
     cmc = CMCClient()
-    signal = SignalEngine()
+    signal = SignalEngineClass()
     quoter = Quoter()
 
     # Fetch quotes

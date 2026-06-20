@@ -82,7 +82,7 @@ class RiskGuard:
         Returns (ok, message) tuple matching what decision.py expects.
         Drawdown is inferred as (peak - current) / peak using the provided portfolio_value.
         """
-        peak_value = self.portfolio.peak_value if hasattr(self.portfolio, "peak_value") else portfolio_value
+        peak_value = getattr(self.portfolio, "peak_value", portfolio_value)
         drawdown_pct = max(0.0, (peak_value - portfolio_value) / peak_value) if peak_value > 0 else 0.0
         result = await self.check_drawdown({"drawdown_pct": drawdown_pct})
         if result["safe"]:
