@@ -1,0 +1,39 @@
+# Environment
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Logs & DB (runtime only, do not commit)
+logs/*.db
+logs/*.db-wal
+logs/*.db-shm
+logs/*.log
+
+# TWAK
+~/.twak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Demo outputs
+demo/*.png
+demo/*.mp4
+demo/*.mov
+
+# Python
+.pytest_cache/
+
+# Kimchi secrets
+.kimchi/secrets/

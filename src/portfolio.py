@@ -1,0 +1,272 @@
+"""Portfolio tracking: holdings, cash, PnL, and value computation."""
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Any
+
+import aiosqlite
+
+from src.config import DB_PATH, ALLOWLIST, HEARTBEAT_SIZE_USD, MAX_POSITION_PCT
+from src.utils import retry_async
+
+logger = logging.getLogger("cascadefade.portfolio")
+
+
+class Portfolio:
+    """Track open positions, cash, and portfolio value via SQLite."""
+
+    def __init__(self, db_path: str = str(DB_PATH)) -> None:
+        self.db_path = db_path
+        self._db: aiosqlite.Connection | None = None
+
+    async def _connect(self) -> aiosqlite.Connection:
+        if self._db is None or self._db.closed:
+            self._db = await aiosqlite.connect(self.db_path, timeout=60.0)
+            await self._db.execute("PRAGMA journal_mode=WAL")
+            await self._db.execute("PRAGMA synchronous=NORMAL")
+            await self._db.execute("PRAGMA foreign_keys=ON")
+            await self._ensure_schema()
+        return self._db
+
+    async def _ensure_schema(self) -> None:
+        # Shared schema — same tables as cache.py
+        sql = """
+        CREATE TABLE IF NOT EXISTS trades (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts          TEXT NOT NULL,
+            side        TEXT NOT NULL,
+            symbol      TEXT NOT NULL,
+            token_in    TEXT,
+            token_out   TEXT,
+            amount_in   REAL,
+            amount_out  REAL,
+            price_in    REAL,
+            price_out   REAL,
+            slippage_pct REAL,
+            tx_hash     TEXT,
+            signal_snapshot TEXT,
+            realized_pnl REAL,
+            portfolio_value REAL,
+            mode        TEXT DEFAULT 'live',
+            status      TEXT DEFAULT 'pending'
+        );
+        CREATE TABLE IF NOT EXISTS positions (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol      TEXT NOT NULL UNIQUE,
+            entry_ts    TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            amount      REAL NOT NULL,
+            tx_hash     TEXT,
+            stop_price  REAL,
+            take_price  REAL,
+            open        INTEGER DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts          TEXT NOT NULL,
+            total_value REAL NOT NULL,
+            cash_value  REAL NOT NULL,
+            positions_value REAL NOT NULL,
+            peak_value  REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts);
+        CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
+        CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);
+        CREATE INDEX IF NOT EXISTS idx_portfolio_ts ON portfolio_snapshots(ts);
+        """
+        await self._db.executescript(sql)
+        await self._db.commit()
+
+    async def get_positions(self) -> list[dict[str, Any]]:
+        """Return all open positions."""
+        db = await self._connect()
+        async with db.execute(
+            "SELECT symbol, entry_ts, entry_price, amount, tx_hash, stop_price, take_price "
+            "FROM positions WHERE open=1"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            {
+                "symbol": r[0],
+                "entry_ts": r[1],
+                "entry_price": r[2],
+                "amount": r[3],
+                "tx_hash": r[4],
+                "stop_price": r[5],
+                "take_price": r[6],
+            }
+            for r in rows
+        ]
+
+    async def get_held_symbols(self) -> list[str]:
+        """Return list of held symbol names."""
+        positions = await self.get_positions()
+        return [p["symbol"] for p in positions]
+
+    async def add_position(
+        self,
+        symbol: str,
+        entry_price: float,
+        amount: float,
+        tx_hash: str,
+    ) -> None:
+        """Record a new open position."""
+        db = await self._connect()
+        stop_price = entry_price * (1 - 0.05)
+        take_price = entry_price * (1 + 0.10)
+        ts = datetime.now(timezone.utc).isoformat()
+        await db.execute(
+            "INSERT INTO positions(symbol, entry_ts, entry_price, amount, tx_hash, stop_price, take_price, open) "
+            "VALUES(?,?,?,?,?,?,?,1) "
+            "ON CONFLICT(symbol) DO UPDATE SET entry_ts=excluded.entry_ts, entry_price=excluded.entry_price, "
+            "amount=excluded.amount, tx_hash=excluded.tx_hash, stop_price=excluded.stop_price, "
+            "take_price=excluded.take_price, open=1",
+            (symbol, ts, entry_price, amount, tx_hash, stop_price, take_price),
+        )
+        await db.commit()
+        logger.info("Position opened: %s @ %.4f x %.4f", symbol, entry_price, amount)
+
+    async def close_position(self, symbol: str, exit_price: float, exit_tx_hash: str) -> dict[str, Any]:
+        """Mark a position as closed and compute PnL."""
+        db = await self._connect()
+        async with db.execute(
+            "SELECT entry_price, amount, tx_hash FROM positions WHERE symbol=? AND open=1", (symbol,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return {"error": f"No open position for {symbol}"}
+
+        entry_price, amount, entry_tx = row
+        pnl = (exit_price - entry_price) * amount
+        pnl_pct = (exit_price - entry_price) / entry_price if entry_price else 0
+
+        await db.execute(
+            "UPDATE positions SET open=0 WHERE symbol=? AND open=1", (symbol,)
+        )
+        await db.commit()
+        logger.info("Position closed: %s pnl=%.2f (%.2f%%)", symbol, pnl, pnl_pct * 100)
+        return {
+            "symbol": symbol,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "amount": amount,
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+            "entry_tx": entry_tx,
+            "exit_tx": exit_tx_hash,
+        }
+
+    async def update_cash(self, amount_usd: float) -> None:
+        """Persist the current cash balance to the latest snapshot.
+
+        Called after every swap so compute_value() always reads fresh cash.
+        """
+        db = await self._connect()
+        # Patch the most recent snapshot's cash_value, or insert a new one
+        async with db.execute(
+            "SELECT id, total_value, positions_value, peak_value FROM portfolio_snapshots ORDER BY id DESC LIMIT 1"
+        ) as cur:
+            row = await cur.fetchone()
+        ts = datetime.now(timezone.utc).isoformat()
+        if row:
+            total = amount_usd + (row[2] or 0.0)
+            peak = max(row[3] or total, total)
+            await db.execute(
+                "UPDATE portfolio_snapshots SET cash_value=?, total_value=?, peak_value=? WHERE id=?",
+                (amount_usd, total, peak, row[0]),
+            )
+        else:
+            await db.execute(
+                "INSERT INTO portfolio_snapshots(ts, total_value, cash_value, positions_value, peak_value) "
+                "VALUES(?,?,?,?,?)",
+                (ts, amount_usd, amount_usd, 0.0, amount_usd),
+            )
+        await db.commit()
+        logger.debug("Cash updated to %.2f", amount_usd)
+
+    async def compute_value(
+        self,
+        price_map: dict[str, dict[str, Any]],
+        cash_usd: float,
+    ) -> dict[str, Any]:
+        """Compute total portfolio value from positions + cash.
+
+        price_map: {symbol: {price: float, ...}}
+        Returns dict with total, cash, positions_value, peak, drawdown info.
+        """
+        positions = await self.get_positions()
+        positions_value = 0.0
+        for pos in positions:
+            sym = pos["symbol"]
+            quote = price_map.get(sym, {})
+            price = quote.get("price", 0.0) or 0.0
+            val = pos["amount"] * price
+            positions_value += val
+
+        total = cash_usd + positions_value
+
+        # Update peak and compute drawdown
+        db = await self._connect()
+        async with db.execute(
+            "SELECT MAX(total_value) FROM portfolio_snapshots"
+        ) as cur:
+            row = await cur.fetchone()
+        peak = row[0] if row and row[0] is not None else total
+        peak = max(peak, total)
+
+        drawdown_pct = (peak - total) / peak if peak > 0 else 0.0
+
+        # Record snapshot
+        ts = datetime.now(timezone.utc).isoformat()
+        await db.execute(
+            "INSERT INTO portfolio_snapshots(ts, total_value, cash_value, positions_value, peak_value) "
+            "VALUES(?,?,?,?,?)",
+            (ts, total, cash_usd, positions_value, peak),
+        )
+        await db.commit()
+
+        return {
+            "total": total,
+            "cash": cash_usd,
+            "positions_value": positions_value,
+            "peak": peak,
+            "drawdown_pct": drawdown_pct,
+        }
+
+    async def get_cash_balance(self) -> float:
+        """Return current cash balance from most recent snapshot."""
+        db = await self._connect()
+        async with db.execute(
+            "SELECT cash_value FROM portfolio_snapshots ORDER BY id DESC LIMIT 1"
+        ) as cur:
+            row = await cur.fetchone()
+        return row[0] if row else 0.0
+
+    async def initialize_cash(self, amount_usd: float) -> None:
+        """Set starting cash balance."""
+        db = await self._connect()
+        ts = datetime.now(timezone.utc).isoformat()
+        await db.execute(
+            "INSERT INTO portfolio_snapshots(ts, total_value, cash_value, positions_value, peak_value) "
+            "VALUES(?,?,?,?,?)",
+            (ts, amount_usd, amount_usd, 0.0, amount_usd),
+        )
+        await db.commit()
+        logger.info("Portfolio initialized with cash=%.2f", amount_usd)
+
+    async def get_last_trade_ts(self) -> str | None:
+        """ISO timestamp of last recorded trade."""
+        db = await self._connect()
+        async with db.execute(
+            "SELECT ts FROM trades ORDER BY id DESC LIMIT 1"
+        ) as cur:
+            row = await cur.fetchone()
+        return row[0] if row else None
+
+    async def close(self) -> None:
+        if self._db:
+            try:
+                await self._db.close()
+            except Exception:
+                pass
+            self._db = None
