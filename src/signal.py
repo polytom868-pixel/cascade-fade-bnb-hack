@@ -162,7 +162,7 @@ def compute_narrative_score(narrative: str, data: dict, regime: str, conviction_
         conviction_history[narrative] = {"score": adjusted, "last_day": day}
 
     all_reasons = m_reasons + l_reasons + a_reasons + f_reasons + r_reasons
-    verdict = "STRONG_LONG" if adjusted >= 60 else "LONG" if adjusted >= 40 else "NEUTRAL" if adjusted >= 20 else "AVOID"
+    verdict = "STRONG_LONG" if adjusted >= 60 else "LONG" if adjusted >= 20 else "NEUTRAL" if adjusted >= 10 else "AVOID"
 
     return {
         "narrative": narrative,
