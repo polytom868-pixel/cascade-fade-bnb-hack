@@ -89,8 +89,8 @@ def get_contract_function(w3: Web3, contract) -> callable:
     try:
         fn = contract.functions.register()
         # Verify it can be built (will fail if wrong signature)
-        fn.build_transaction({"from": Web3.to_checksum_address(WALLET_ADDRESS)})  # type: ignore
-        return fn, "register()"  # type: ignore[reportGeneralTypeIssues,reportAttributeAccessIssue]
+        fn.build_transaction({"from": Web3.to_checksum_address(WALLET_ADDRESS)})
+        return fn, "register()"
     except Exception:
         pass
 
