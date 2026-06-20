@@ -80,13 +80,13 @@ class DecisionEngine:
         action_notes = []
 
         # --- risk guards ---
-        dd_ok, dd_msg = self.risk.circuit_breaker(balances.get("usd_value", 0))
+        dd_ok, dd_msg = await self.risk.circuit_breaker(balances.get("usd_value", 0))
         action_notes.append(dd_msg)
         if not dd_ok:
             actions["rejections"].append(("ALL", dd_msg))
             return {"actions": actions, "notes": action_notes}
 
-        floor_msg = self.risk.floor_guard(balances.get("total_value", 0))
+        floor_msg = await self.risk.floor_guard(balances.get("total_value", 0))
         action_notes.append(floor_msg)
 
         expose_ok, expose_msg = self.risk.exposure_check(

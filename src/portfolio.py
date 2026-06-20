@@ -85,6 +85,13 @@ class Portfolio:
         await self._db.executescript(sql)
         await self._db.commit()
 
+    def total_exposure(self) -> float:
+        """Total USD value of all open positions (using entry prices)."""
+        return sum(
+            p.get("units", 0.0) * p.get("entry_price", 0.0)
+            for p in self.positions.values()
+        )
+
     def get(self, symbol: str) -> dict[str, Any] | None:
         """Synchronously get a position's in-memory data."""
         return self.positions.get(symbol)
