@@ -96,26 +96,31 @@ class CMCClient:
         return result
 
     def _extract_quote(self, data: dict[str, Any], symbol: str) -> dict[str, Any]:
-        """Extract a single token quote from bulk response."""
         status = data.get("status", {})
         if status.get("error_code"):
             return {"error": status.get("error_message", "unknown")}
 
-        quotes = data.get("data", {})
-        for key, entry in quotes.items():
-            if entry.get("symbol", "").upper() == symbol.upper():
-                usd = entry.get("quote", {}).get("USD", {})
-                return {
-                    "price": usd.get("price", 0.0),
-                    "volume_24h": usd.get("volume_24h", 0.0),
-                    "percent_change_1h": usd.get("percent_change_1h", 0.0),
-                    "percent_change_24h": usd.get("percent_change_24h", 0.0),
-                    "percent_change_7d": usd.get("percent_change_7d", 0.0),
-                    "market_cap": usd.get("market_cap", 0.0),
-                    "last_updated": usd.get("last_updated", ""),
-                    "name": entry.get("name", ""),
-                }
-        return {"error": f"Symbol {symbol} not found in response"}
+        raw = data.get("data", {})
+        # CMC may return a dict keyed by symbol, where values can be dict or list
+        entry = raw.get(symbol)
+        if isinstance(entry, list):
+            # Select the primary token (usually top-ranked, cmc_rank smallest integer)
+            entry = min(entry, key=lambda e: e.get("cmc_rank") or 999_999)
+        if not isinstance(entry, dict):
+            return {"error": f"Symbol {symbol} not found in response"}
+
+        usd = entry.get("quote", {}).get("USD", {})
+        return {
+            "price": usd.get("price", 0.0),
+            "volume_24h": usd.get("volume_24h", 0.0),
+            "percent_change_1h": usd.get("percent_change_1h", 0.0),
+            "percent_change_24h": usd.get("percent_change_24h", 0.0),
+            "percent_change_7d": usd.get("percent_change_7d", 0.0),
+            "market_cap": usd.get("market_cap", 0.0),
+            "last_updated": usd.get("last_updated", ""),
+            "name": entry.get("name", ""),
+            "cmc_rank": entry.get("cmc_rank", None),
+        }
 
     async def get_fear_greed(self) -> dict[str, Any] | None:
         """Fetch latest Fear & Greed index."""
