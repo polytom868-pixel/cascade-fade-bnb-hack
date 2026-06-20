@@ -1,4 +1,5 @@
 import logging
+import statistics
 from typing import Dict, List, Tuple, Any
 from src.config import CASH_CURRENCY, HEARTBEAT_SIZE_USD
 from src.cmc_client import CMCClient
@@ -219,21 +220,29 @@ class SignalEngineClass:
         self.conviction_history: dict = {}
         self.day: int = 0
 
-    def _fetch_narrative_data(self) -> dict:
-        qs = self.cmc.latest_quotes(list(ALLOWLIST_TO_TOKEN_ADDRESS.keys()))
+    async def _fetch_narrative_data(self) -> dict:
+        # Only fetch basket tokens (30 unique across 10 narratives)
+        from src.config import NARRATIVE_BASKETS, ALLOWLIST_TO_TOKEN_ADDRESS
+        unique_tokens = set()
+        for tokens in NARRATIVE_BASKETS.values():
+            unique_tokens.update(tokens)
+        symbol_map = {t: "" for t in unique_tokens if t in ALLOWLIST_TO_TOKEN_ADDRESS}
+        try:
+            qs = await self.cmc.get_bulk_quotes(symbol_map)
+        except Exception as e:
+            logger.warning("CMC fetch failed: %s", e)
+            qs = {}
         # Group by narrative, average basket metrics
-        from src.config import NARRATIVE_BASKETS
         data = {}
         for narrative, tokens in NARRATIVE_BASKETS.items():
             basket_data = [qs.get(t, {}) for t in tokens]
-            # Fallback: build simple basket data from token quotes
-            avg_price = sum(b.get("quote", {}).get("USD", {}).get("price", 0) for b in basket_data) / max(len(basket_data), 1)
-            vol_change = max((b.get("quote", {}).get("USD", {}).get("volume_change_24h", 0) for b in basket_data), default=0)
-            mcap_change = max((b.get("quote", {}).get("USD", {}).get("percent_change_7d", 0) for b in basket_data), default=0)
+            avg_price = sum(b.get("price", 0) for b in basket_data) / max(len(basket_data), 1)
+            vol_change = max((b.get("volume_24h", 0) for b in basket_data), default=0)
+            mcap_change = statistics.mean((b.get("percent_change_24h", 0) for b in basket_data)) if basket_data else 0
             data[narrative] = {
                 "basket_return_7d_pct": mcap_change / 100 if mcap_change else 0,
-                "volume_change_7d_pct": vol_change / 100 if vol_change else 0,
-                "relative_strength_vs_bnb_7d": 1.0,  # requires CMC dominance data
+                "volume_change_7d_pct": vol_change / max(avg_price, 1) * 100 if avg_price else 0,
+                "relative_strength_vs_bnb_7d": 1.0,
                 "drawdown_from_30d_high_pct": 0.15,
                 "rsi_14": 50,
                 "liquidity_usd": 10_000_000,
@@ -244,9 +253,8 @@ class SignalEngineClass:
             }
         return data
 
-    def evaluate(self) -> dict:
+    async def evaluate(self) -> dict:
         self.day += 1
-        # Detect regime (placeholder: uses defaults since full metrics not fetched)
         regime, reason = detect_market_regime(bnb_dominance=45, fear_greed=50, mcap_change_7d=0.02)
-        narrative_data = self._fetch_narrative_data()
+        narrative_data = await self._fetch_narrative_data()
         return global_scan(regime, narrative_data, self.conviction_history, self.day)
