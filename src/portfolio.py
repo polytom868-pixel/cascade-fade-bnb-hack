@@ -23,12 +23,17 @@ class Portfolio:
         self.positions: dict[str, dict[str, Any]] = {}
 
     async def _connect(self) -> aiosqlite.Connection:
-        if self._db is None or self._db.closed:
-            self._db = await aiosqlite.connect(self.db_path, timeout=60.0)
-            await self._db.execute("PRAGMA journal_mode=WAL")
-            await self._db.execute("PRAGMA synchronous=NORMAL")
-            await self._db.execute("PRAGMA foreign_keys=ON")
-            await self._ensure_schema()
+        if self._db is not None:
+            try:
+                await self._db.execute("SELECT 1")
+                return self._db
+            except (aiosqlite.Error, ValueError):
+                pass
+        self._db = await aiosqlite.connect(self.db_path, timeout=60.0)
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA synchronous=NORMAL")
+        await self._db.execute("PRAGMA foreign_keys=ON")
+        await self._ensure_schema()
         return self._db
 
     async def _ensure_schema(self) -> None:

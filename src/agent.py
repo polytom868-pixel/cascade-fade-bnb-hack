@@ -49,10 +49,10 @@ signal.signal(signal.SIGTERM, _signal_handler)
 class Agent:
     """Asyncio trading agent that loops forever until shutdown."""
 
-    def __init__(self, mode: str | None = None, initial_cash: float = 1000.0) -> None:
+    def __init__(self, mode: str | None = None, initial_cash: float = 1000.0, interval_minutes: int = TRADE_INTERVAL_MINUTES) -> None:
         self.mode = (mode or os.getenv("AGENT_MODE", "paper")).lower()
         self.initial_cash = initial_cash
-        self.interval = timedelta(minutes=TRADE_INTERVAL_MINUTES)
+        self.interval = timedelta(minutes=interval_minutes)
 
         # Core components
         self.cache = Cache()
@@ -93,9 +93,13 @@ class Agent:
 
         # Verify BSC RPC
         if not self.quoter.w3.is_connected():
-            logger.error("BSC RPC not connected — check BNB_RPC_URL")
-            raise RuntimeError("Cannot start without BSC RPC")
-        logger.info("BSC RPC connected — block=%s", self.quoter.w3.eth.block_number)
+            if self.mode != "paper":
+                logger.error("BSC RPC not connected — check BNB_RPC_URL")
+                raise RuntimeError("Cannot start without BSC RPC")
+            else:
+                logger.warning("BSC RPC unavailable — running in paper mode, proceeding without on-chain data")
+        else:
+            logger.info("BSC RPC connected — block=%s", self.quoter.w3.eth.block_number)
 
         # Initialize portfolio cash
         await self.portfolio.initialize_cash(self.initial_cash)
@@ -222,9 +226,10 @@ def main() -> None:
                       help="paper (log only) or live (execute swaps)")
     parser.add_argument("--cash", type=float, default=1000.0, help="Initial cash balance in USD")
     parser.add_argument("--cycles", type=int, default=0, help="Run N cycles and exit (0=loop forever)")
+    parser.add_argument("--interval", type=int, default=TRADE_INTERVAL_MINUTES, help="Trade interval in minutes (default: 30)")
     args = parser.parse_args()
 
-    agent = Agent(mode=args.mode, initial_cash=args.cash)
+    agent = Agent(mode=args.mode, initial_cash=args.cash, interval_minutes=args.interval)
 
     if args.cycles > 0:
         results = asyncio.run(agent.dry_run(args.cycles))
