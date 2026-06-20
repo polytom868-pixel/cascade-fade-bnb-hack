@@ -129,3 +129,10 @@ class TradeLogger:
             except Exception:
                 pass
             self._db = None
+
+
+# Module-level quick log for synchronous code
+def log_trade(side, symbol, units, price, value, tx_hash=None, slippage=0.0):
+    """Log a trade synchronously (decision.py uses this)."""
+    logger.info("TRADE | %s | %s | units=%.6f | price=%.4f | value=%.2f | tx=%s | slippage=%.2f%%",
+                side, symbol, units, price, value, tx_hash or "", slippage)

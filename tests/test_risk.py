@@ -14,10 +14,10 @@ from src.config import (
     PORTFOLIO_FLOOR_USD,
 )
 from src.portfolio import Portfolio
-from src.risk import RiskManager
+from src.risk import RiskGuard
 
 
-async def test_drawdown_kill(risk: RiskManager) -> None:
+async def test_drawdown_kill(risk: RiskGuard) -> None:
     """Hard stop triggers at 25% drawdown."""
     result = await risk.check_drawdown({"drawdown_pct": 0.24})
     assert result["safe"] is True, "24% drawdown should be safe"
@@ -33,7 +33,7 @@ async def test_drawdown_kill(risk: RiskManager) -> None:
     print("✅ test_drawdown_kill passed")
 
 
-async def test_portfolio_floor(risk: RiskManager) -> None:
+async def test_portfolio_floor(risk: RiskGuard) -> None:
     """Stop new trades if portfolio < $5."""
     result = await risk.check_portfolio_floor({"total": 5.0})
     assert result["safe"] is True
@@ -45,7 +45,7 @@ async def test_portfolio_floor(risk: RiskManager) -> None:
     print("✅ test_portfolio_floor passed")
 
 
-async def test_position_size(risk: RiskManager) -> None:
+async def test_position_size(risk: RiskGuard) -> None:
     """Position size respects portfolio % and cash limits."""
     size = risk.position_size(cash=1000, portfolio_value=1000)
     assert size == 100.0, f"Expected 100, got {size}"
@@ -62,37 +62,37 @@ async def test_position_size(risk: RiskManager) -> None:
     print("✅ test_position_size passed")
 
 
-async def test_pre_trade_checks(risk: RiskManager) -> None:
+async def test_pre_trade_checks(risk: RiskGuard) -> None:
     """Pre-trade gate rejects bad conditions."""
     result = risk.pre_trade_check(
-        {"total": 100, "drawdown_pct": 0.1}, slippage_pct=0.005, held_count=0
+        {"total": 100, "drawdown_pct": 0.1}, 0.005, 0
     )
     assert result["approved"] is True
 
     result = risk.pre_trade_check(
-        {"total": 100, "drawdown_pct": 0.25}, slippage_pct=0.005, held_count=0
+        {"total": 100, "drawdown_pct": 0.25}, 0.005, 0
     )
     assert result["approved"] is False
 
     result = risk.pre_trade_check(
-        {"total": 4, "drawdown_pct": 0.05}, slippage_pct=0.005, held_count=0
+        {"total": 4, "drawdown_pct": 0.05}, 0.005, 0
     )
     assert result["approved"] is False
 
     result = risk.pre_trade_check(
-        {"total": 100, "drawdown_pct": 0.05}, slippage_pct=0.005, held_count=2
+        {"total": 100, "drawdown_pct": 0.05}, 0.005, 2
     )
     assert result["approved"] is False
 
     result = risk.pre_trade_check(
-        {"total": 100, "drawdown_pct": 0.05}, slippage_pct=0.02, held_count=0
+        {"total": 100, "drawdown_pct": 0.05}, 0.02, 0
     )
     assert result["approved"] is False
 
     print("✅ test_pre_trade_checks passed")
 
 
-async def test_heartbeat(risk: RiskManager) -> None:
+async def test_heartbeat(risk: RiskGuard) -> None:
     """Heartbeat triggers when no trade in 22h+."""
     result = await risk.check_heartbeat()
     assert result["needed"] is True
@@ -109,7 +109,7 @@ async def test_heartbeat(risk: RiskManager) -> None:
 
 async def run_all() -> None:
     portfolio = Portfolio()
-    risk = RiskManager(portfolio)
+    risk = RiskGuard(portfolio)
     try:
         await test_drawdown_kill(risk)
         await test_portfolio_floor(risk)

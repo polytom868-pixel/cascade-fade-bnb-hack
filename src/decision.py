@@ -6,6 +6,8 @@ from src.config import (
     ALLOWLIST,
     NARRATIVE_BASKETS,
     MAX_POSITION_PCT,
+    MAX_HOLD_HOURS,
+    MIN_TRADE_SIZE_USD,
     PORTFOLIO_FLOOR_USD,
     STOP_LOSS_PCT,
     TAKE_PROFIT_PCT,
@@ -49,6 +51,22 @@ class DecisionEngine:
         self.risk = risk
         self._last_buy_tick: Dict[str, float] = {}
 
+    async def run_cycle(self, initial_cash: float, price_map: dict[str, float]) -> dict[str, Any]:
+        """Run one full decision cycle: build signal/bals then evaluate."""
+        signal_result = {
+            "top_narrative": "",
+            "top_verdict": "AVOID",
+            "top_conviction": 0,
+            "regime": "TRANSITION",
+            "conviction_cap": 75,
+        }
+        balances = {
+            CASH_CURRENCY: initial_cash,
+            "usd_value": initial_cash,
+            "total_value": initial_cash,
+        }
+        return await self.evaluate(signal_result, balances)
+
     def _heartbeat_buy(self, token: str, amount: float):
         price = self.twak.price(f"{token}/{CASH_CURRENCY}")
         units = amount / max(price, 1e-9)
@@ -57,7 +75,7 @@ class DecisionEngine:
         log_trade("BUY", token, units, price, amount)
         logger.info("Heartbeat buy %s $%.2f", token, amount)
 
-    def evaluate(self, signal_result: dict, balances: dict) -> dict:
+    async def evaluate(self, signal_result: dict, balances: dict) -> dict:
         actions = {"buys": [], "sells": [], "holds": [], "rejections": []}
         action_notes = []
 
@@ -95,30 +113,49 @@ class DecisionEngine:
         cash = balances.get(CASH_CURRENCY, 0)
 
         # --- SELL logic: rebalance out of non-top narratives ---
-        for position_token in self.portfolio.positions:
+        for position_token in list(self.portfolio.positions):
             # Find which narrative this token belongs to
             token_narrative = None
             for narr, tokens in NARRATIVE_BASKETS.items():
                 if position_token in tokens:
                     token_narrative = narr
                     break
+
+            # P1 #2: 48-hour max hold timeout — force sell if exceeded
+            pos_entry = self.portfolio.positions[position_token]
+            entry_ts = pos_entry.get("entry_ts", "")
+            if entry_ts:
+                try:
+                    entry_dt = datetime.datetime.fromisoformat(entry_ts)
+                    age_hours = (datetime.datetime.now(datetime.timezone.utc) - entry_dt).total_seconds() / 3600
+                    if age_hours >= MAX_HOLD_HOURS:
+                        logger.info("48h timeout: %s held %.1fh — forcing sell", position_token, age_hours)
+                        actions["sells"].append({"token": position_token, "reason": "48h_timeout", "age_hours": age_hours})
+                        continue
+                except Exception:
+                    pass
+
             if token_narrative == top_narrative and top_verdict in ("LONG", "STRONG_LONG"):
                 actions["holds"].append(position_token)
                 continue
-            pos = self.portfolio.get(position_token)
+            pos = self.portfolio.positions[position_token]
             price = self.twak.price(f"{position_token}/{CASH_CURRENCY}")
-            value = pos.units * price
+            value = pos["units"] * price
             if value < PORTFOLIO_FLOOR_USD:
                 actions["holds"].append(position_token)
                 continue
-            sell_ok, sell_msg = self.risk.pre_trade_check("SELL", value, balances.get("total_value", 0))
+            sell_ok, sell_msg = self.risk.pre_trade_check({"total": balances.get("total_value", 0)}, value, 0)
             if not sell_ok:
                 actions["rejections"].append((position_token, sell_msg))
                 continue
+            # TWAK swap: sell token -> USDT
+            units = pos["units"]
+            swap_result = await self.twak.swap(units, position_token, CASH_CURRENCY, slippage=0.5)
+            tx_hash = swap_result.get("tx_hash") or (swap_result.get("data", {}).get("txHash") if isinstance(swap_result.get("data"), dict) else None)
             self.portfolio.remove(position_token)
-            log_trade("SELL", position_token, pos.units, price, value)
-            actions["sells"].append({"token": position_token, "units": pos.units, "price": price, "value": value})
-            logger.info("SELL %s $%.2f (%s)", position_token, value, sell_msg)
+            log_trade("SELL", position_token, units, price, value, tx_hash=tx_hash)
+            actions["sells"].append({"token": position_token, "units": units, "price": price, "value": value, "tx_hash": tx_hash})
+            logger.info("SELL %s $%.2f (%s) tx=%s", position_token, value, sell_msg, tx_hash)
 
         # --- BUY logic: allocate to top narrative basket ---
         if top_verdict not in ("LONG", "STRONG_LONG") or not basket:
@@ -141,15 +178,22 @@ class DecisionEngine:
             if amount < PORTFOLIO_FLOOR_USD:
                 actions["rejections"].append((token, f"amt ${amount:.2f} < min ${MIN_TRADE_SIZE_USD}"))
                 continue
-            buy_ok, buy_msg = self.risk.pre_trade_check("BUY", amount, balances.get("total_value", 0))
+            buy_ok, buy_msg = self.risk.pre_trade_check(
+                {"total": balances.get("total_value", 0), "drawdown_pct": 0},
+                amount,
+                0,
+            )
             if not buy_ok:
                 actions["rejections"].append((token, buy_msg))
                 continue
-            self.risk.position_size(units, price, "BUY")
-            self.portfolio.add(token, units, price)
+            self.risk.position_size(amount, balances.get("total_value", 0))
+            self.portfolio.add(token, price, units)
             self._last_buy_tick[token] = now
-            log_trade("BUY", token, units, price, amount)
-            actions["buys"].append({"token": token, "units": units, "price": price, "value": amount})
-            logger.info("BUY %s $%.2f", token, amount)
+            # TWAK swap: buy token with USDT
+            swap_result = await self.twak.swap(amount, CASH_CURRENCY, token, slippage=0.5)
+            tx_hash = swap_result.get("tx_hash") or (swap_result.get("data", {}).get("txHash") if isinstance(swap_result.get("data"), dict) else None)
+            log_trade("BUY", token, units, price, amount, tx_hash=tx_hash)
+            actions["buys"].append({"token": token, "units": units, "price": price, "value": amount, "tx_hash": tx_hash})
+            logger.info("BUY %s $%.2f tx=%s", token, amount, tx_hash)
 
         return {"actions": actions, "notes": action_notes}

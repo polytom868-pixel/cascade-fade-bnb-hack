@@ -134,3 +134,7 @@ class TWAKExecutor:
     async def get_portfolio(self) -> dict[str, Any]:
         """Get full portfolio overview."""
         return await self._run(["twak", "wallet", "portfolio", "--json"])
+
+
+# Alias for backward compatibility
+TwakClient = TWAKExecutor

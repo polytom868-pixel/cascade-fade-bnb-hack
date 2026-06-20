@@ -18,6 +18,9 @@ class Portfolio:
     def __init__(self, db_path: str = str(DB_PATH)) -> None:
         self.db_path = db_path
         self._db: aiosqlite.Connection | None = None
+        # Synchronous in-memory positions dict used by decision.py evaluate loop
+        # {symbol: {"entry_ts": str, "entry_price": float, "units": float, "tx_hash": str|None}}
+        self.positions: dict[str, dict[str, Any]] = {}
 
     async def _connect(self) -> aiosqlite.Connection:
         if self._db is None or self._db.closed:
@@ -76,6 +79,56 @@ class Portfolio:
         """
         await self._db.executescript(sql)
         await self._db.commit()
+
+    def get(self, symbol: str) -> dict[str, Any] | None:
+        """Synchronously get a position's in-memory data."""
+        return self.positions.get(symbol)
+
+    def add(self, symbol: str, entry_price: float, units: float) -> None:
+        """Synchronously add/update a position in-memory."""
+        ts = datetime.now(timezone.utc).isoformat()
+        self.positions[symbol] = {
+            "entry_ts": ts,
+            "entry_price": entry_price,
+            "units": units,
+            "tx_hash": None,
+        }
+
+    def remove(self, symbol: str) -> None:
+        """Synchronously remove a position from in-memory cache."""
+        self.positions.pop(symbol, None)
+
+    def get_stop_price(self, symbol: str) -> float:
+        """Return stop-loss price for a position, or 0 if not found."""
+        pos = self.positions.get(symbol)
+        if not pos:
+            return 0.0
+        entry = pos.get("entry_price", 0.0)
+        return entry * (1 - 0.05)  # 5% stop-loss from entry
+
+    def get_take_price(self, symbol: str) -> float:
+        """Return take-profit price for a position, or 0 if not found."""
+        pos = self.positions.get(symbol)
+        if not pos:
+            return 0.0
+        entry = pos.get("entry_price", 0.0)
+        return entry * (1 + 0.10)  # 10% take-profit from entry
+
+    async def sync_position_to_db(self, symbol: str) -> None:
+        """Persist an in-memory position to the DB (called async after swap)."""
+        pos = self.positions.get(symbol)
+        if not pos:
+            return
+        await self.add_position(
+            symbol=symbol,
+            entry_price=pos["entry_price"],
+            amount=pos["units"],
+            tx_hash=pos.get("tx_hash") or "",
+        )
+
+    async def remove_position_from_db(self, symbol: str) -> None:
+        """Remove a position from DB (called async after sell swap)."""
+        await self.close_position(symbol, exit_price=0.0, exit_tx_hash="")
 
     async def get_positions(self) -> list[dict[str, Any]]:
         """Return all open positions."""

@@ -47,48 +47,6 @@ class Cache:
             classification TEXT,
             ts     TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS trades (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts          TEXT NOT NULL,
-            side        TEXT NOT NULL,
-            symbol      TEXT NOT NULL,
-            token_in    TEXT,
-            token_out   TEXT,
-            amount_in   REAL,
-            amount_out  REAL,
-            price_in    REAL,
-            price_out   REAL,
-            slippage_pct REAL,
-            tx_hash     TEXT,
-            signal_snapshot TEXT,
-            realized_pnl REAL,
-            portfolio_value REAL,
-            mode        TEXT DEFAULT 'live',
-            status      TEXT DEFAULT 'pending'
-        );
-        CREATE TABLE IF NOT EXISTS positions (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol      TEXT NOT NULL UNIQUE,
-            entry_ts    TEXT NOT NULL,
-            entry_price REAL NOT NULL,
-            amount      REAL NOT NULL,
-            tx_hash     TEXT,
-            stop_price  REAL,
-            take_price  REAL,
-            open        INTEGER DEFAULT 1
-        );
-        CREATE TABLE IF NOT EXISTS portfolio_snapshots (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts          TEXT NOT NULL,
-            total_value REAL NOT NULL,
-            cash_value  REAL NOT NULL,
-            positions_value REAL NOT NULL,
-            peak_value  REAL NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts);
-        CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
-        CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);
-        CREATE INDEX IF NOT EXISTS idx_portfolio_ts ON portfolio_snapshots(ts);
         """
         await db.executescript(sql)
         await db.commit()

@@ -35,6 +35,11 @@ def fmt_pct(value: float) -> str:
     return f"{value * 100:.2f}%"
 
 
+def fmt_bnb(value: float) -> str:
+    """Format a BNB amount with 4 decimals."""
+    return f"{value:,.4f} BNB"
+
+
 def parse_twak_json_output(stdout: str) -> dict[str, Any]:
     """Parse JSON output from `twak ... --json`.
 

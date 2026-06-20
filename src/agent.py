@@ -19,13 +19,15 @@ from src.config import (
     LOG_LEVEL,
     TRADE_INTERVAL_MINUTES,
     ALLOWLIST,
+    STOP_LOSS_PCT,
+    TAKE_PROFIT_PCT,
 )
 from src.decision import DecisionEngine
 from src.log import TradeLogger
 from src.portfolio import Portfolio
 from src.quoter import Quoter
-from src.risk import RiskManager
-from src.signal import SignalEngine as SignalEngineClass
+from src.risk import RiskGuard
+from src.signal import SignalEngineClass
 from src.twak import TWAKExecutor
 from src.utils import setup_logging
 
@@ -58,20 +60,14 @@ class Agent:
         self.portfolio = Portfolio()
         self.quoter = Quoter()
         self.twak = TWAKExecutor()
-        self.signal_engine = SignalEngineClass()
-        self.risk_manager = RiskManager(self.portfolio)
+        self.signal_engine = SignalEngineClass(self.cmc)
+        self.risk_manager = RiskGuard(self.portfolio)
         self.trade_logger = TradeLogger()
 
         self.decision = DecisionEngine(
-            cmc_client=self.cmc,
-            signal_engine=self.signal_engine,
-            risk_manager=self.risk_manager,
+            twak_client=self.twak,
             portfolio=self.portfolio,
-            quoter=self.quoter,
-            twak=self.twak,
-            trade_logger=self.trade_logger,
-            cache=self.cache,
-            mode=self.mode,
+            risk=self.risk_manager,
         )
 
         self._start_ts = datetime.now(timezone.utc)
@@ -137,11 +133,45 @@ class Agent:
         start = datetime.now(timezone.utc)
         logger.info("--- Cycle %d | %s ---", self._cycle_count, start.isoformat())
 
+        # Fetch current prices for all held symbols before running decisions
+        price_map: dict[str, float] = {}
+        held_symbols = await self.portfolio.get_held_symbols()
+        for sym in held_symbols:
+            try:
+                price = self.twak.price(f"{sym}/USDT")
+                if price > 0:
+                    price_map[sym] = price
+            except Exception:
+                pass
+
+        # P1 #4: stop/take-profit check — generate forced sells before running decisions
+        forced_sells = []
+        positions = await self.portfolio.get_positions()
+        for pos in positions:
+            sym = pos["symbol"]
+            stop_price = pos.get("stop_price") or 0.0
+            take_price = pos.get("take_price") or 0.0
+            current_price = price_map.get(sym, 0.0)
+            if current_price <= 0:
+                continue
+            if stop_price > 0 and current_price <= stop_price:
+                logger.info("STOP-LOSS triggered: %s price=%.4f <= stop=%.4f", sym, current_price, stop_price)
+                forced_sells.append({"token": sym, "reason": "stop_loss", "price": current_price})
+            elif take_price > 0 and current_price >= take_price:
+                logger.info("TAKE-PROFIT triggered: %s price=%.4f >= take=%.4f", sym, current_price, take_price)
+                forced_sells.append({"token": sym, "reason": "take_profit", "price": current_price})
+
         try:
-            summary = await self.decision.run_cycle(self.initial_cash)
+            summary = await self.decision.run_cycle(self.initial_cash, price_map)
         except Exception as exc:
             logger.exception("Cycle %d failed: %s", self._cycle_count, exc)
-            summary = {"error": str(exc), "actions": []}
+            summary = {"error": str(exc), "actions": {"buys": [], "sells": [], "holds": [], "rejections": []}, "notes": []}
+
+        # Prepend forced sells to the decision's sell actions
+        if forced_sells:
+            summary.setdefault("actions", {})
+            summary["actions"].setdefault("sells", [])
+            summary["actions"]["sells"] = forced_sells + summary["actions"]["sells"]
 
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         logger.info("Cycle %d complete in %.1fs | actions=%s", self._cycle_count, elapsed, summary.get("actions", []))
