@@ -170,7 +170,7 @@ class DecisionEngine:
                 continue
             price = price_map.get(token, 0.0)
             units = amount / max(price, 1e-9)
-            if amount < PORTFOLIO_FLOOR_USD:
+            if amount < MIN_TRADE_SIZE_USD:
                 actions["rejections"].append((token, f"amt ${amount:.2f} < min ${MIN_TRADE_SIZE_USD}"))
                 continue
             buy_ok, buy_msg = self.risk.pre_trade_check(
