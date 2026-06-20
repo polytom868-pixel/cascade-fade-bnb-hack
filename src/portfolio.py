@@ -51,7 +51,7 @@ class Portfolio:
             await self._db.execute("PRAGMA synchronous=NORMAL")
             await self._db.execute("PRAGMA foreign_keys=ON")
             await self._ensure_schema()
-        return self._db
+        return new_db
 
     async def _ensure_schema(self) -> None:
         # Shared schema — same tables as cache.py
@@ -197,8 +197,7 @@ class Portfolio:
     ) -> None:
         """Record a new open position."""
         db = await self._connect()
-        stop_price = entry_price * (1 - 0.05)
-        take_price = entry_price * (1 + 0.10)
+        stop_price, take_price = _compute_stop_take(entry_price)
         ts = datetime.now(timezone.utc).isoformat()
         await db.execute(
             "INSERT INTO positions(symbol, entry_ts, entry_price, amount, tx_hash, stop_price, take_price, open) "
@@ -280,13 +279,7 @@ class Portfolio:
         Returns dict with total, cash, positions_value, peak, drawdown info.
         """
         positions = await self.get_positions()
-        positions_value = 0.0
-        for pos in positions:
-            sym = pos["symbol"]
-            quote = price_map.get(sym, {})
-            price = quote.get("price", 0.0) or 0.0
-            val = pos["amount"] * price
-            positions_value += val
+        positions_value = _sum_position_values(positions, price_map)
 
         total = cash_usd + positions_value
 

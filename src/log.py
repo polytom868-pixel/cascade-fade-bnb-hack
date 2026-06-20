@@ -7,6 +7,7 @@ from typing import Any
 import aiosqlite
 
 from src.config import DB_PATH
+from src.utils import ensure_db
 
 logger = logging.getLogger("cascadefade.log")
 
@@ -19,11 +20,12 @@ class TradeLogger:
         self._db: aiosqlite.Connection | None = None
 
     async def _connect(self) -> aiosqlite.Connection:
-        if self._db is None or self._db.closed:
-            self._db = await aiosqlite.connect(self.db_path, timeout=60.0)
+        new_db = await ensure_db(self._db, self.db_path)
+        if new_db is not self._db:
+            self._db = new_db
             await self._db.execute("PRAGMA journal_mode=WAL")
             await self._db.execute("PRAGMA synchronous=NORMAL")
-        return self._db
+        return new_db
 
     async def log_trade(
         self,
@@ -42,7 +44,7 @@ class TradeLogger:
         portfolio_value: float,
         mode: str = "live",
         status: str = "pending",
-    ) -> int:
+    ) -> int | None:
         """Record a trade in the journal. Returns row id."""
         db = await self._connect()
         ts = datetime.now(timezone.utc).isoformat()
@@ -98,7 +100,7 @@ class TradeLogger:
         reason: str,
         confidence: float,
         cmc_data: dict[str, Any],
-    ) -> int:
+    ) -> int | None:
         """Log a decision even when no trade is executed."""
         db = await self._connect()
         ts = datetime.now(timezone.utc).isoformat()
