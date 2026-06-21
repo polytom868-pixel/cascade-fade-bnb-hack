@@ -130,7 +130,7 @@ class DecisionEngine:
                 continue
             pos = self.portfolio.positions[position_token]
             price = price_map.get(position_token, 0.0)
-            value = pos["amount"] * price
+            value = pos["units"] * price
             if value < PORTFOLIO_FLOOR_USD:
                 actions["holds"].append(position_token)
                 continue
@@ -139,7 +139,7 @@ class DecisionEngine:
                 actions["rejections"].append((position_token, sell_msg))
                 continue
             # TWAK swap: sell token -> USDT
-            units = pos["amount"]
+            units = pos["units"]
             if os.getenv("AGENT_MODE", "paper") == "paper":
                 tx_hash = f"0xSELL_PAPER_{position_token}"
             else:
