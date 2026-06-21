@@ -4,7 +4,14 @@ from typing import Dict, List, Tuple, Any
 from src.config import CASH_CURRENCY, HEARTBEAT_SIZE_USD, NARRATIVE_BASKETS
 from src.cmc_client import CMCClient
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
+
+# Pre-built reason tuples for score_risk_adjustment()
+_REASON_LONG = ("Long", "Narrative momentum detected")
+_REASON_NEUTRAL = ("Neutral", "No clear narrative signal")
+_REASON_SHORT = ("Short", "Narrative exhaustion / negative momentum")
 
 # ---------------------------------------------------------------------------
 # 1. Regime Detection
@@ -118,9 +125,18 @@ def score_risk_adjustment(narrative: str, data: dict) -> Tuple[int, list]:
     vol = data.get("volatility_30d", 0)
     if vol > 1.0: score -= 30; reasons.append(f"Extreme volatility")
     elif vol > 0.6: score -= 15; reasons.append(f"Elevated volatility")
+    rsi_score = data.get("rsi_14", 0.5)
+    if isinstance(rsi_score, (list, tuple, np.ndarray)):
+        rsi_score = float(rsi_score[0]) if len(rsi_score) > 0 else 0.5
+    elif rsi_score is None:
+        rsi_score = 0.5
     exhaustion, ex_reasons = compute_exhaustion_score(narrative, data)
-    if exhaustion > 60: score -= 40; reasons.append(f"Exhaustion critical ({exhaustion}/100)")
-    elif exhaustion > 30: score -= 20; reasons.append(f"Exhaustion caution ({exhaustion}/100)")
+    if exhaustion > 60:
+        score -= 40
+        reasons.append(f"Exhaustion critical ({exhaustion}/100)")
+    elif exhaustion > 30:
+        score -= 20
+        reasons.append(f"Exhaustion caution ({exhaustion}/100)")
     return max(0, min(100, score)), reasons
 
 
@@ -188,13 +204,17 @@ def global_scan(regime: str, narrative_data: dict, conviction_history: dict = No
 
     ranked = sorted(results.items(), key=lambda x: x[1]["conviction"], reverse=True)
     MIN_THRESHOLD = 20
-    qualified = {n: max(d["conviction"], 1) for n, d in ranked if d["conviction"] >= MIN_THRESHOLD}
-    sum_sq = sum(v ** 2 for v in qualified.values())
-    weights = {n: round((qualified[n] ** 2 / sum_sq) * 100, 1) for n in qualified}
-    weights.update({n: 0.0 for n, d in ranked if d["conviction"] < MIN_THRESHOLD})
 
-    for n in weights:
-        weights[n] = min(weights[n], 35.0)
+    # Avoid full dict copy: compute sum_sq directly from iteration
+    qualified_vals = [d["conviction"] for _, d in ranked if d["conviction"] >= MIN_THRESHOLD]
+    sum_sq = sum(v ** 2 for v in qualified_vals)
+    weights = {}
+    for n, d in ranked:
+        if d["conviction"] >= MIN_THRESHOLD:
+            w = round((d["conviction"] ** 2 / sum_sq) * 100, 1)
+            weights[n] = min(w, 35.0)
+        else:
+            weights[n] = 0.0
 
     top = ranked[0]
     rotation = (f"CONCENTRATE_{top[0].upper().replace(' ', '_')}" if top[1]["conviction"] >= 60 else

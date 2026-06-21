@@ -2,6 +2,8 @@
 import os
 from pathlib import Path
 
+from db_base import WAL_AUTOCHECKPOINT  # noqa: E402
+
 CACHE_TTL_SECONDS = 1800  # match trade interval
 
 # ── Base paths ──────────────────────────────────────────────────────────

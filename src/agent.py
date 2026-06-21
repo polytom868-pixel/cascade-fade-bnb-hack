@@ -83,73 +83,6 @@ class Agent:
 
         signal.signal(signal.SIGINT, _handle_sigint)
 
-# Ensure src/ is on path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from src.cache import Cache
-from src.cmc_client import CMCClient
-from src.config import (
-    AGENT_MODE,
-    LOG_LEVEL,
-    TRADE_INTERVAL_MINUTES,
-    ALLOWLIST,
-    STOP_LOSS_PCT,
-    TAKE_PROFIT_PCT,
-    NARRATIVE_BASKETS,
-)
-from src.decision import CASH_CURRENCY, RISK_CURRENCY
-from src.decision import DecisionEngine
-from src.log import TradeLogger
-from src.portfolio import Portfolio
-from src.quoter import Quoter
-from src.risk import RiskGuard
-from src.signal import SignalEngineClass
-from src.twak import TWAKExecutor
-from src.utils import setup_logging
-
-logger = logging.getLogger("cascadefade.agent")
-
-# ── globals for graceful shutdown ─────────────────────────────────────────
-_shutdown_requested = asyncio.Event()
-
-
-def _signal_handler(sig: int, frame: Any) -> None:
-    logger.warning("SIGINT received — requesting graceful shutdown...")
-    _shutdown_requested.set()
-
-
-signal.signal(signal.SIGINT, _signal_handler)
-signal.signal(signal.SIGTERM, _signal_handler)
-
-
-class Agent:
-    """Asyncio trading agent that loops forever until shutdown."""
-
-    def __init__(self, mode: str | None = None, initial_cash: float = 1000.0, interval_minutes: int = TRADE_INTERVAL_MINUTES) -> None:
-        self.mode = (mode or os.getenv("AGENT_MODE", "paper")).lower()
-        self.initial_cash = initial_cash
-        self.interval = timedelta(minutes=interval_minutes)
-
-        # Core components
-        self.cache = Cache()
-        self.cmc = CMCClient()
-        self.portfolio = Portfolio()
-        self.quoter = Quoter()
-        self.twak = TWAKExecutor()
-        self.signal_engine = SignalEngineClass(self.cmc)
-        self.risk_manager = RiskGuard(self.portfolio)
-        self.trade_logger = TradeLogger()
-
-        self.decision = DecisionEngine(
-            twak_client=self.twak,
-            portfolio=self.portfolio,
-            risk=self.risk_manager,
-            signal_engine=self.signal_engine,
-        )
-
-        self._start_ts = datetime.now(timezone.utc)
-        self._cycle_count = 0
-
     async def setup(self) -> None:
         """Initialize portfolio and verify CMC / TWAK connectivity."""
         setup_logging(os.getenv("LOG_LEVEL", "INFO"))
@@ -187,6 +120,11 @@ class Agent:
         # Initialize portfolio cash
         await self.portfolio.initialize_cash(self.initial_cash)
         logger.info("Portfolio initialized: cash=$%.2f", self.initial_cash)
+
+        # WAL checkpoint to reduce DB file size on startup
+        db = await self.portfolio._connect()
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        await db.commit()
 
         # Print wallet address if TWAK available
         try:
@@ -260,39 +198,28 @@ class Agent:
             logger.exception("Cycle %d failed: %s", self._cycle_count, exc)
             summary = {"error": str(exc), "actions": {"buys": [], "sells": [], "holds": [], "rejections": []}, "notes": []}
 
-        # Execute forced sells (stop-loss / take-profit)
-        sell_tasks = []
-        for sell in forced_sells:
-            sym = sell["token"]
-            price = sell["price"]
-            pos = self.portfolio.positions.get(sym)
-            units = pos["units"] if pos else 0.0
-            if self.mode != "paper":
-                sell_tasks.append(self.twak.swap(units, sym, CASH_CURRENCY, slippage=0.5))
-            else:
-                sell_tasks.append(asyncio.sleep(0))  # no-op for paper
-
-        if sell_tasks:
-            results = await asyncio.gather(*sell_tasks, return_exceptions=True)
-            for i, sell in enumerate(forced_sells):
-                sym = sell["token"]
-                price = sell["price"]
-                result = results[i]
-                if isinstance(result, Exception):
-                    tx_hash = ""
-                    logger.warning("Forced sell %s failed: %s", sym, result)
-                elif self.mode != "paper":
-                    tx_hash = result.get("tx_hash") or ""
-                else:
-                    tx_hash = f"0xSELL_PAPER_{sym}"
-                await self.portfolio.close_position(sym, price, tx_hash)
-                logger.info("Executed forced sell: %s reason=%s price=%.4f tx=%s", sym, sell["reason"], price, tx_hash)
+        # Execute forced sells (stop-loss / take-profit) in parallel
+        if forced_sells:
+            sell_tasks = [self._execute_sell(sell, price_map) for sell in forced_sells]
+            await asyncio.gather(*sell_tasks, return_exceptions=True)
 
         # Prepend forced sells to the decision's sell actions
         if forced_sells:
             summary.setdefault("actions", {})
             summary["actions"].setdefault("sells", [])
             summary["actions"]["sells"] = forced_sells + summary["actions"]["sells"]
+
+        # Health check log (every 5th cycle to avoid flooding)
+        if self._cycle_count % 5 == 0:
+            held = await self.portfolio.get_held_symbols()
+            last_trade = await self.portfolio.get_last_trade_ts()
+            logger.info(
+                "agent_cycle_summary | cycles=%d elapsed=%s held=%s last_trade=%s",
+                self._cycle_count,
+                str((datetime.now(timezone.utc) - self._start_ts)).split(".")[0],
+                held,
+                last_trade or "none",
+            )
 
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         logger.info("Cycle %d complete in %.1fs | actions=%s", self._cycle_count, elapsed, summary.get("actions", []))
@@ -315,6 +242,23 @@ class Agent:
             await self.health_check()
 
         await self.shutdown()
+
+    async def _execute_sell(self, sell: dict[str, Any], price_map: dict[str, float]) -> None:
+        """Execute a single forced sell (stop-loss or take-profit)."""
+        sym = sell["token"]
+        price = sell["price"]
+        pos = self.portfolio.positions.get(sym)
+        units = pos["units"] if pos else 0.0
+        try:
+            if self.mode != "paper":
+                result = await self.twak.swap(units, sym, CASH_CURRENCY, slippage=0.5)
+                tx_hash = result.get("tx_hash") or ""
+            else:
+                tx_hash = f"0xSELL_PAPER_{sym}"
+            await self.portfolio.close_position(sym, price, tx_hash)
+            logger.info("Forced sell OK: %s reason=%s price=%.4f tx=%s", sym, sell["reason"], price, tx_hash)
+        except Exception as exc:
+            logger.warning("Forced sell %s failed: %s", sym, exc)
 
     async def shutdown(self) -> None:
         """Graceful shutdown: log final state, close connections."""

@@ -14,6 +14,8 @@ CACHE_TTL_SECONDS = 1800  # 30 minutes
 class Cache:
     """Async SQLite cache with WAL mode."""
 
+    _checkpoint_done: bool = False  # Class-level flag for WAL checkpoint
+
     def __init__(self, db_path: str | None = None) -> None:
         self._db_path = db_path or str(DB_PATH)
         self._db: aiosqlite.Connection | None = None  # Instance variable, not class-level
@@ -29,8 +31,17 @@ class Cache:
             await self._db.execute("PRAGMA cache_size=10000")
             await self._db.execute("PRAGMA busy_timeout=30000")
             await self._init_schema()
+            if not Cache._checkpoint_done:
+                await self.checkpoint()
+                Cache._checkpoint_done = True
             await self._gc_expired()
         return self._db
+
+    async def checkpoint(self) -> None:
+        """Truncate WAL file to reclaim space."""
+        db = await self._connect()
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        await db.commit()
 
     async def _init_schema(self) -> None:
         db = await self._connect()

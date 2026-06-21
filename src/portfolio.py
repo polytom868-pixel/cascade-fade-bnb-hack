@@ -6,7 +6,7 @@ from typing import Any
 
 import aiosqlite
 
-from src.config import DB_PATH, ALLOWLIST, HEARTBEAT_SIZE_USD, MAX_POSITION_PCT
+from src.config import DB_PATH, HEARTBEAT_SIZE_USD, MAX_POSITION_PCT
 from src.utils import ensure_db, retry_async
 
 STOP_LOSS_PCT = 0.05
@@ -54,9 +54,19 @@ class Portfolio:
             await self._ensure_schema()
         return new_db
 
-    async def _ensure_schema(self) -> None:
-        # Shared schema — same tables as cache.py
-        db = await self._connect()
+    @staticmethod
+    def _row_to_position(r: tuple) -> dict[str, Any]:
+        return {
+            "symbol": r[0],
+            "entry_ts": r[1],
+            "entry_price": r[2],
+            "amount": r[3],
+            "tx_hash": r[4],
+            "stop_price": r[5],
+            "take_price": r[6],
+        }
+
+    async def _ensure_schema(self, db: aiosqlite.Connection) -> None:
         sql = """
         CREATE TABLE IF NOT EXISTS trades (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -178,18 +188,7 @@ class Portfolio:
             "FROM positions WHERE open=1"
         ) as cur:
             rows = await cur.fetchall()
-        return [
-            {
-                "symbol": r[0],
-                "entry_ts": r[1],
-                "entry_price": r[2],
-                "amount": r[3],
-                "tx_hash": r[4],
-                "stop_price": r[5],
-                "take_price": r[6],
-            }
-            for r in rows
-        ]
+        return [self._row_to_position(r) for r in rows]
 
     async def get_held_symbols(self) -> list[str]:
         """Return list of held symbol names."""
