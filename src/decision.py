@@ -147,7 +147,7 @@ class DecisionEngine:
                 tx_hash = swap_result.get("tx_hash") or (swap_result.get("data", {}).get("txHash") if isinstance(swap_result.get("data"), dict) else None)
             self.portfolio.remove(position_token)
             await self.portfolio.remove_position_from_db(position_token)
-            await log_trade("SELL", position_token, units, price, value, tx_hash=tx_hash)
+            log_trade("SELL", position_token, units, price, value, tx_hash=tx_hash)
             actions["sells"].append({"token": position_token, "units": units, "price": price, "value": value, "tx_hash": tx_hash})
             logger.info("SELL %s $%.2f (%s) tx=%s", position_token, value, sell_msg, tx_hash)
 
@@ -191,7 +191,7 @@ class DecisionEngine:
                 tx_hash = swap_result.get("tx_hash") or (swap_result.get("data", {}).get("txHash") if isinstance(swap_result.get("data"), dict) else None)
             # Sync to DB after tx_hash is known
             await self.portfolio.sync_position_to_db(token)
-            await log_trade("BUY", token, units, price, amount, tx_hash=tx_hash)
+            log_trade("BUY", token, units, price, amount, tx_hash=tx_hash)
             actions["buys"].append({"token": token, "units": units, "price": price, "value": amount, "tx_hash": tx_hash})
             logger.info("BUY %s $%.2f tx=%s", token, amount, tx_hash)
 
