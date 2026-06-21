@@ -66,7 +66,8 @@ class Portfolio:
             "take_price": r[6],
         }
 
-    async def _ensure_schema(self, db: aiosqlite.Connection) -> None:
+    @staticmethod
+    async def _ensure_schema(db: aiosqlite.Connection) -> None:
         sql = """
         CREATE TABLE IF NOT EXISTS trades (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
