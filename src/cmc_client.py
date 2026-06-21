@@ -1,10 +1,14 @@
 """Async CoinMarketCap REST client with bulk fetch, retries, and caching."""
 import asyncio
+import atexit
 import logging
 import os
+import time
 from typing import Any
 
 import aiohttp
+
+from src.config import CACHE_TTL_SECONDS
 
 from src.config import (
     CMC_BASE_URL,
@@ -29,12 +33,16 @@ class CMCClient:
             logger.warning("CMC_API_KEY not set — CMC calls will fail")
         self._session: aiohttp.ClientSession | None = None
         self._semaphore = asyncio.Semaphore(5)  # limit concurrent requests
+        self._last_success: float = 0.0
+        self._cached_result: dict[str, dict[str, Any]] = {}
+        atexit.register(self._sync_close)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 headers={
                     "Accept": "application/json",
+                    "Accept-Encoding": "gzip, deflate",
                     "X-CMC_PRO_API_KEY": self.api_key,
                 },
                 timeout=aiohttp.ClientTimeout(total=CMC_TIMEOUT),
@@ -69,7 +77,8 @@ class CMCClient:
         """Fetch latest quotes for all symbols in one bulk call.
 
         symbol_map: {symbol: cmc_id} (cmc_id may be empty string; falls back to symbol).
-        Returns: {symbol: quote_dict}.
+        Returns: {symbol: quote_dict}.  On failure returns stale cached data if
+        within CACHE_TTL_SECONDS of the last successful fetch.
         """
         if not symbol_map:
             return {}
@@ -89,11 +98,19 @@ class CMCClient:
         if symbols:
             params["symbol"] = ",".join(symbols)
 
-        data = await self._request("GET", CMC_QUOTES_LATEST, params=params)
-        result: dict[str, dict[str, Any]] = {}
-        for sym in symbol_map:
-            result[sym] = self._extract_quote(data, sym)
-        return result
+        try:
+            data = await self._request("GET", CMC_QUOTES_LATEST, params=params)
+            result: dict[str, dict[str, Any]] = {}
+            for sym in symbol_map:
+                result[sym] = self._extract_quote(data, sym)
+            self._cached_result = result
+            self._last_success = time.monotonic()
+            return result
+        except Exception:
+            if self._cached_result and (time.monotonic() - self._last_success) < CACHE_TTL_SECONDS:
+                logger.warning("CMC fetch failed, returning stale cached data")
+                return self._cached_result
+            raise
 
     def _extract_quote(self, data: dict[str, Any], symbol: str) -> dict[str, Any]:
         status = data.get("status", {})
@@ -152,3 +169,13 @@ class CMCClient:
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+
+    def _sync_close(self) -> None:
+        """Synchronous cleanup for atexit — only closes if loop is not running."""
+        if self._session and not self._session.closed:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop — safe to close synchronously
+                asyncio.run(self.close())
+            # else: loop is running; close() must be called explicitly

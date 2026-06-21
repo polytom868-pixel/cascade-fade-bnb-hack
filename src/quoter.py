@@ -1,4 +1,5 @@
 """PancakeSwap V3 QuoterV2 slippage estimator via web3.py."""
+import asyncio
 import logging
 from typing import Any
 
@@ -94,7 +95,7 @@ class Quoter:
             logger.error("Cannot connect to BSC RPC: %s", rpc_url)
         self.quoter = self.w3.eth.contract(address=Web3.to_checksum_address(PCS_V3_QUOTER_V2), abi=QUOTER_V2_ABI)
 
-    def estimate_slippage_single(
+    async def estimate_slippage_single(
         self,
         from_symbol: str,
         to_symbol: str,
@@ -140,7 +141,9 @@ class Quoter:
                     "amountIn": amount_in_wei,
                     "sqrtPriceLimitX96": 0,
                 }
-                result = self.quoter.functions.quoteExactInputSingle(params).call()
+                result = await asyncio.to_thread(
+                    self.quoter.functions.quoteExactInputSingle(params).call
+                )
                 amount_out_wei = result[0]
                 to_decimals = DECIMALS.get(to_symbol.upper(), 18)
                 amount_out = amount_out_wei / (10 ** to_decimals)
@@ -172,14 +175,16 @@ class Quoter:
         )
         return best
 
-    def get_balance(self, address: str, token_addr: str | None = None) -> float:
+    async def get_balance(self, address: str, token_addr: str | None = None) -> float:
         """Get BNB or BEP-20 token balance for an address."""
         if not self.w3.is_connected():
             return 0.0
         try:
             if token_addr is None or token_addr.upper() == WBNB.upper():
                 # BNB balance
-                bal = self.w3.eth.get_balance(Web3.to_checksum_address(address))
+                bal = await asyncio.to_thread(
+                    self.w3.eth.get_balance, Web3.to_checksum_address(address)
+                )
                 return bal / 1e18
             else:
                 # Minimal ERC-20 balanceOf ABI
@@ -193,7 +198,9 @@ class Quoter:
                     }
                 ]
                 token = self.w3.eth.contract(address=Web3.to_checksum_address(token_addr), abi=erc20_abi)
-                bal = token.functions.balanceOf(Web3.to_checksum_address(address)).call()
+                bal = await asyncio.to_thread(
+                    token.functions.balanceOf(Web3.to_checksum_address(address)).call
+                )
                 return bal / 1e18
         except Exception as exc:
             logger.warning("Balance fetch failed for %s %s: %s", address, token_addr, exc)

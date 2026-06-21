@@ -60,6 +60,80 @@ class Agent:
         self.cache = Cache()
         self.cmc = CMCClient()
         self.portfolio = Portfolio()
+        self.quoter = Quoter() if self.mode != "paper" else None
+        self.twak = TWAKExecutor()
+        self.signal_engine = SignalEngineClass(self.cmc)
+        self.risk_manager = RiskGuard(self.portfolio)
+        self.trade_logger = TradeLogger()
+
+        self.decision = DecisionEngine(
+            twak_client=self.twak,
+            portfolio=self.portfolio,
+            risk=self.risk_manager,
+            signal_engine=self.signal_engine,
+        )
+
+        self._start_ts = datetime.now(timezone.utc)
+        self._cycle_count = 0
+
+        # Instance-level SIGINT handler
+        def _handle_sigint(sig_num: int, _frame: Any) -> None:
+            logger.warning("SIGINT received — requesting graceful shutdown...")
+            _shutdown_requested.set()
+
+        signal.signal(signal.SIGINT, _handle_sigint)
+
+# Ensure src/ is on path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from src.cache import Cache
+from src.cmc_client import CMCClient
+from src.config import (
+    AGENT_MODE,
+    LOG_LEVEL,
+    TRADE_INTERVAL_MINUTES,
+    ALLOWLIST,
+    STOP_LOSS_PCT,
+    TAKE_PROFIT_PCT,
+    NARRATIVE_BASKETS,
+)
+from src.decision import CASH_CURRENCY, RISK_CURRENCY
+from src.decision import DecisionEngine
+from src.log import TradeLogger
+from src.portfolio import Portfolio
+from src.quoter import Quoter
+from src.risk import RiskGuard
+from src.signal import SignalEngineClass
+from src.twak import TWAKExecutor
+from src.utils import setup_logging
+
+logger = logging.getLogger("cascadefade.agent")
+
+# ── globals for graceful shutdown ─────────────────────────────────────────
+_shutdown_requested = asyncio.Event()
+
+
+def _signal_handler(sig: int, frame: Any) -> None:
+    logger.warning("SIGINT received — requesting graceful shutdown...")
+    _shutdown_requested.set()
+
+
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
+
+
+class Agent:
+    """Asyncio trading agent that loops forever until shutdown."""
+
+    def __init__(self, mode: str | None = None, initial_cash: float = 1000.0, interval_minutes: int = TRADE_INTERVAL_MINUTES) -> None:
+        self.mode = (mode or os.getenv("AGENT_MODE", "paper")).lower()
+        self.initial_cash = initial_cash
+        self.interval = timedelta(minutes=interval_minutes)
+
+        # Core components
+        self.cache = Cache()
+        self.cmc = CMCClient()
+        self.portfolio = Portfolio()
         self.quoter = Quoter()
         self.twak = TWAKExecutor()
         self.signal_engine = SignalEngineClass(self.cmc)
@@ -94,13 +168,19 @@ class Agent:
             logger.error("CMC connectivity check failed: %s", exc)
             raise RuntimeError("Cannot start without CMC data") from exc
 
-        # Verify BSC RPC
-        if not self.quoter.w3.is_connected():
-            if self.mode != "paper":
+        # Verify BSC RPC (skip in paper mode)
+        if self.mode == "paper":
+            logger.warning("Paper mode — skipping BSC RPC check")
+        elif self.quoter is None:
+            # Lazy-load quoter for non-paper mode
+            self.quoter = Quoter()
+            if not self.quoter.w3.is_connected():
                 logger.error("BSC RPC not connected — check BNB_RPC_URL")
                 raise RuntimeError("Cannot start without BSC RPC")
-            else:
-                logger.warning("BSC RPC unavailable — running in paper mode, proceeding without on-chain data")
+            logger.info("BSC RPC connected — block=%s", self.quoter.w3.eth.block_number)
+        elif not self.quoter.w3.is_connected():
+            logger.error("BSC RPC not connected — check BNB_RPC_URL")
+            raise RuntimeError("Cannot start without BSC RPC")
         else:
             logger.info("BSC RPC connected — block=%s", self.quoter.w3.eth.block_number)
 
@@ -181,18 +261,32 @@ class Agent:
             summary = {"error": str(exc), "actions": {"buys": [], "sells": [], "holds": [], "rejections": []}, "notes": []}
 
         # Execute forced sells (stop-loss / take-profit)
+        sell_tasks = []
         for sell in forced_sells:
             sym = sell["token"]
             price = sell["price"]
             pos = self.portfolio.positions.get(sym)
             units = pos["units"] if pos else 0.0
             if self.mode != "paper":
-                swap_result = await self.twak.swap(units, sym, CASH_CURRENCY, slippage=0.5)
-                tx_hash = swap_result.get("tx_hash") or ""
+                sell_tasks.append(self.twak.swap(units, sym, CASH_CURRENCY, slippage=0.5))
             else:
-                tx_hash = f"0xSELL_PAPER_{sym}"
-            await self.portfolio.close_position(sym, price, tx_hash)
-            logger.info("Executed forced sell: %s reason=%s price=%.4f tx=%s", sym, sell["reason"], price, tx_hash)
+                sell_tasks.append(asyncio.sleep(0))  # no-op for paper
+
+        if sell_tasks:
+            results = await asyncio.gather(*sell_tasks, return_exceptions=True)
+            for i, sell in enumerate(forced_sells):
+                sym = sell["token"]
+                price = sell["price"]
+                result = results[i]
+                if isinstance(result, Exception):
+                    tx_hash = ""
+                    logger.warning("Forced sell %s failed: %s", sym, result)
+                elif self.mode != "paper":
+                    tx_hash = result.get("tx_hash") or ""
+                else:
+                    tx_hash = f"0xSELL_PAPER_{sym}"
+                await self.portfolio.close_position(sym, price, tx_hash)
+                logger.info("Executed forced sell: %s reason=%s price=%.4f tx=%s", sym, sell["reason"], price, tx_hash)
 
         # Prepend forced sells to the decision's sell actions
         if forced_sells:

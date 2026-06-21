@@ -27,6 +27,12 @@ from src.log import log_trade
 
 logger = logging.getLogger(__name__)
 
+# Pre-built reverse map: token -> narrative (built once at module load)
+def _build_narrative_map() -> dict[str, str]:
+    return {token: narrative for narrative, tokens in NARRATIVE_BASKETS.items() for token in tokens}
+
+TOKEN_TO_NARRATIVE = _build_narrative_map()
+
 
 def _size_position(cash: float, regime: str, conviction: int, cap: int) -> float:
     base = cash * MAX_POSITION_PCT
@@ -102,12 +108,8 @@ class DecisionEngine:
 
         # --- SELL logic: rebalance out of non-top narratives ---
         for position_token in list(self.portfolio.positions):
-            # Find which narrative this token belongs to
-            token_narrative = None
-            for narr, tokens in NARRATIVE_BASKETS.items():
-                if position_token in tokens:
-                    token_narrative = narr
-                    break
+            # O(1) lookup via pre-built reverse map
+            token_narrative = TOKEN_TO_NARRATIVE.get(position_token)
 
             # P1 #2: 48-hour max hold timeout — force sell if exceeded
             pos_entry = self.portfolio.positions[position_token]
