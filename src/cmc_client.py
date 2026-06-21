@@ -91,6 +91,8 @@ class CMCClient:
             async def _do() -> dict[str, Any]:
                 async with session.request(method, url, **kwargs) as resp:
                     data = await resp.json()
+                    if not isinstance(data, dict):
+                        raise RuntimeError(f"CMC returned non-dict response ({type(data).__name__})")
                     if resp.status == 429:
                         retry_after = int(resp.headers.get("Retry-After", 60))
                         logger.warning("CMC rate limited, retry after %ds", retry_after)
