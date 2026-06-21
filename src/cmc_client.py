@@ -33,7 +33,10 @@ _connector: aiohttp.TCPConnector | None = None
 def _build_connector() -> aiohttp.TCPConnector:
     global _resolver, _connector
     if _connector is None:
-        _resolver = aiohttp.AsyncResolver(nameservers=["8.8.8.8"])
+        try:
+            _resolver = aiohttp.AsyncResolver(nameservers=["8.8.8.8"])
+        except RuntimeError:
+            _resolver = None
         _connector = aiohttp.TCPConnector(
             limit=10,
             limit_per_host=5,
