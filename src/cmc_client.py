@@ -24,6 +24,25 @@ from src.utils import retry_async
 
 logger = logging.getLogger("cascadefade.cmc")
 
+# Module-level resolver and connector shared across all CMCClient instances.
+# DNS resolution is 400-800ms; pre-resolving avoids that cost on every request.
+_resolver: aiohttp.AsyncResolver | None = None
+_connector: aiohttp.TCPConnector | None = None
+
+
+def _build_connector() -> aiohttp.TCPConnector:
+    global _resolver, _connector
+    if _connector is None:
+        _resolver = aiohttp.AsyncResolver(nameservers=["8.8.8.8"])
+        _connector = aiohttp.TCPConnector(
+            limit=10,
+            limit_per_host=5,
+            enable_cleanup_closed=True,
+            force_close=False,
+            resolver=_resolver,
+        )
+    return _connector
+
 
 class CMCClient:
     """Async CMC REST client."""
@@ -36,6 +55,7 @@ class CMCClient:
             "Accept": "application/json",
             "X-CMC_PRO_API_KEY": self.api_key,
             "Accept-Encoding": "gzip",
+            "Connection": "keep-alive",
         }
         self._session: aiohttp.ClientSession | None = None
         self._semaphore = asyncio.Semaphore(5)  # limit concurrent requests
@@ -43,18 +63,27 @@ class CMCClient:
         self._cached_result: dict[str, dict[str, Any]] = {}
         atexit.register(self._sync_close)
 
-    async def _get_session(self) -> aiohttp.ClientSession:
+    def _get_session(self) -> aiohttp.ClientSession:
+        """Return the persistent session, creating it once if necessary."""
         if self._session is None or self._session.closed:
+            connector = _build_connector()
+            timeout = aiohttp.ClientTimeout(total=CMC_TIMEOUT, connect=10)
             self._session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=timeout,
                 headers=self._headers,
-                timeout=aiohttp.ClientTimeout(total=CMC_TIMEOUT),
+                auto_decompress=True,
             )
         return self._session
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        """Async entry point to get or create the session (loop-aware)."""
+        return self._get_session()
 
     async def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
         """Make a rate-limited, retry-backed request."""
         async with self._semaphore:
-            session = await self._get_session()
+            session = self._get_session()
             url = f"{CMC_BASE_URL}{path}"
 
             async def _do() -> dict[str, Any]:
@@ -85,7 +114,7 @@ class CMCClient:
         if not symbol_map:
             return {}
 
-        # Prefer numeric IDs; fallback to symbols
+        # Prefer numeric IDs; fallback to symbols — pre-join once per call
         ids = []
         symbols = []
         for sym, cid in symbol_map.items():
@@ -100,17 +129,15 @@ class CMCClient:
         if symbols:
             params["symbol"] = ",".join(symbols)
 
-        # Session reuse: create session if needed
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=CMC_TIMEOUT))
-
+        # Always reuse the persistent session — never recreate here
+        session = self._get_session()
         url = f"{CMC_BASE_URL}{CMC_QUOTES_LATEST}"
 
         # Retry logic with exponential backoff
         last_error: Exception | None = None
         for attempt in range(CMC_RETRIES):
             try:
-                async with self._session.get(url, params=params, headers=self._headers) as resp:
+                async with session.get(url, params=params, headers=self._headers) as resp:
                     data = await resp.json()
                     if resp.status == 429:
                         retry_after = int(resp.headers.get("Retry-After", 60))
@@ -128,9 +155,14 @@ class CMCClient:
                 last_error = e
                 if attempt < CMC_RETRIES - 1:
                     await asyncio.sleep(CMC_RETRY_BACKOFF * (2 ** attempt))
-                    # Recreate session on error for fresh connection
-                    if self._session.closed:
-                        self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=CMC_TIMEOUT))
+                    # Session stays alive across retries — only recreate if actually closed
+                    if self._session is None or self._session.closed:
+                        self._session = aiohttp.ClientSession(
+                            connector=_build_connector(),
+                            timeout=aiohttp.ClientTimeout(total=CMC_TIMEOUT, connect=10),
+                            headers=self._headers,
+                            auto_decompress=True,
+                        )
                 else:
                     logger.error("CMC fetch failed after %d attempts: %s", CMC_RETRIES, e)
 

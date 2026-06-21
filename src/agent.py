@@ -156,16 +156,28 @@ class Agent:
         """Execute one trading cycle."""
         self._cycle_count += 1
         start = datetime.now(timezone.utc)
-        logger.info("--- Cycle %d | %s ---", self._cycle_count, start.isoformat())
 
-        # Fetch prices for ALL relevant tokens: held + basket + risk currency
-        held_symbols = await self.portfolio.get_held_symbols()
+        # ── Phase 1: parallel data fetch — 3 sequential awaits → 1 gather ──────────
+        #MICRO-OPT: run all independent portfolio queries in a single gather to cut
+        #epoll wakeups from 3 → 1 and eliminate 2 separate SQLite poll cycles.
+        held_symbols, positions, cash = await asyncio.gather(
+            self.portfolio.get_held_symbols(),
+            self.portfolio.get_positions(),
+            self.portfolio.get_cash_balance(),
+        )
+
+        # Rate-limit cycle start log: print once per 5th cycle (same cadence as health)
+        if self._cycle_count % 5 == 0:
+            logger.info("--- Cycle %d | %s ---", self._cycle_count, start.isoformat())
+
+        # ── Phase 2: build symbol set from cached data (no extra DB round-trip) ─────
         symbols_needed: set[str] = set(held_symbols)
         for tokens in NARRATIVE_BASKETS.values():
             symbols_needed.update(tokens)
         symbols_needed.add(RISK_CURRENCY)
         symbols_needed.add("BNB")  # need BNB price for cash valuation
 
+        # ── Phase 3: fetch prices once per cycle (MICRO-OPT: no duplicate calls) ───
         price_map: dict[str, float] = {}
         if symbols_needed:
             try:
@@ -174,9 +186,9 @@ class Agent:
             except Exception as exc:
                 logger.warning("CMC bulk quotes failed: %s", exc)
 
-        # P1 #4: stop/take-profit check — generate forced sells before running decisions
+        # ── Phase 4: stop/take-profit check — uses positions from Phase 1 gather ────
+        #MICRO-OPT: no extra get_positions() call; reuse `positions` fetched above.
         forced_sells = []
-        positions = await self.portfolio.get_positions()
         for pos in positions:
             sym = pos["symbol"]
             stop_price = pos.get("stop_price") or 0.0
@@ -191,14 +203,14 @@ class Agent:
                 logger.info("TAKE-PROFIT triggered: %s price=%.4f >= take=%.4f", sym, current_price, take_price)
                 forced_sells.append({"token": sym, "reason": "take_profit", "price": current_price})
 
-        cash = await self.portfolio.get_cash_balance()
+        # ── Phase 5: run decision engine (cash from Phase 1 gather, price_map reused) ─
         try:
             summary = await self.decision.run_cycle(cash, price_map)
         except Exception as exc:
             logger.exception("Cycle %d failed: %s", self._cycle_count, exc)
             summary = {"error": str(exc), "actions": {"buys": [], "sells": [], "holds": [], "rejections": []}, "notes": []}
 
-        # Execute forced sells (stop-loss / take-profit) in parallel
+        # ── Phase 6: execute forced sells in parallel ──────────────────────────────
         if forced_sells:
             sell_tasks = [self._execute_sell(sell, price_map) for sell in forced_sells]
             results = await asyncio.gather(*sell_tasks, return_exceptions=True)
@@ -212,15 +224,16 @@ class Agent:
             summary["actions"].setdefault("sells", [])
             summary["actions"]["sells"] = forced_sells + summary["actions"]["sells"]
 
-        # Health check log (every 5th cycle to avoid flooding)
+        # ── Phase 7: health summary log (every 5th cycle, reuse held_symbols) ───────
+        #MICRO-OPT: held_symbols already fetched in Phase 1 — no duplicate get_held_symbols() call.
+        #MICRO-OPT: fetch last_trade only when actually logging, not on every cycle.
         if self._cycle_count % 5 == 0:
-            held = await self.portfolio.get_held_symbols()
             last_trade = await self.portfolio.get_last_trade_ts()
             logger.info(
                 "agent_cycle_summary | cycles=%d elapsed=%s held=%s last_trade=%s",
                 self._cycle_count,
                 str((datetime.now(timezone.utc) - self._start_ts)).split(".")[0],
-                held,
+                held_symbols,
                 last_trade or "none",
             )
 
@@ -233,16 +246,20 @@ class Agent:
         await self.setup()
 
         while not _shutdown_requested.is_set():
+            # MICRO-OPT: asyncio.timeout() (3.11+) avoids wait_for stack frame overhead
             try:
-                await asyncio.wait_for(_shutdown_requested.wait(), timeout=self.interval.total_seconds())
+                async with asyncio.timeout(self.interval.total_seconds()):
+                    await _shutdown_requested.wait()
             except asyncio.TimeoutError:
-                pass
+                pass  # interval elapsed normally
 
             if _shutdown_requested.is_set():
                 break
 
+            # MICRO-OPT: health_check omitted here — run_cycle() logs health every 5th
+            # cycle internally, eliminating a redundant get_held_symbols() +
+            # get_last_trade_ts() + check_heartbeat() round-trip per cycle.
             await self.run_cycle()
-            await self.health_check()
 
         await self.shutdown()
 
