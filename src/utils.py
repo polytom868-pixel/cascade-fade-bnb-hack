@@ -87,9 +87,21 @@ async def ensure_db(db: aiosqlite.Connection | None, db_path: str) -> aiosqlite.
     """Return a live aiosqlite connection, reconnecting if necessary."""
     if db is not None:
         try:
-            await db.execute("SELECT 1")
-            return db
-        except (aiosqlite.Error, ValueError):
+            # Lightweight: sqlite3_closed check equivalent
+            if hasattr(db, '_connection') and db._connection is not None:
+                return db
+        except Exception:
             pass
     new_db: aiosqlite.Connection = await aiosqlite.connect(db_path, timeout=60.0)
     return new_db
+
+
+async def apply_db_pragmas(db: aiosqlite.Connection) -> None:
+    """Apply standard performance pragmas."""
+    await db.execute("PRAGMA journal_mode=WAL")
+    await db.execute("PRAGMA synchronous=NORMAL")
+    await db.execute("PRAGMA foreign_keys=ON")
+    await db.execute("PRAGMA busy_timeout=30000")
+    await db.execute("PRAGMA temp_store=MEMORY")
+    await db.execute("PRAGMA cache_size=10000")
+    await db.execute("PRAGMA wal_autocheckpoint=1000")

@@ -50,6 +50,7 @@ class Portfolio:
             await self._db.execute("PRAGMA journal_mode=WAL")
             await self._db.execute("PRAGMA synchronous=NORMAL")
             await self._db.execute("PRAGMA foreign_keys=ON")
+            await self._db.execute("PRAGMA busy_timeout=30000")
             await self._ensure_schema()
         return new_db
 
@@ -151,12 +152,19 @@ class Portfolio:
         pos = self.positions.get(symbol)
         if not pos:
             return
-        await self.add_position(
-            symbol=symbol,
-            entry_price=pos["entry_price"],
-            amount=pos["units"],
-            tx_hash=pos.get("tx_hash") or "",
-        )
+        db = await self._connect()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await self.add_position(
+                symbol=symbol,
+                entry_price=pos["entry_price"],
+                amount=pos["units"],
+                tx_hash=pos.get("tx_hash") or "",
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     async def remove_position_from_db(self, symbol: str) -> None:
         """Remove a position from DB (called async after sell swap)."""
@@ -199,15 +207,20 @@ class Portfolio:
         db = await self._connect()
         stop_price, take_price = _compute_stop_take(entry_price)
         ts = datetime.now(timezone.utc).isoformat()
-        await db.execute(
-            "INSERT INTO positions(symbol, entry_ts, entry_price, amount, tx_hash, stop_price, take_price, open) "
-            "VALUES(?,?,?,?,?,?,?,1) "
-            "ON CONFLICT(symbol) DO UPDATE SET entry_ts=excluded.entry_ts, entry_price=excluded.entry_price, "
-            "amount=excluded.amount, tx_hash=excluded.tx_hash, stop_price=excluded.stop_price, "
-            "take_price=excluded.take_price, open=1",
-            (symbol, ts, entry_price, amount, tx_hash, stop_price, take_price),
-        )
-        await db.commit()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await db.execute(
+                "INSERT INTO positions(symbol, entry_ts, entry_price, amount, tx_hash, stop_price, take_price, open) "
+                "VALUES(?,?,?,?,?,?,?,1) "
+                "ON CONFLICT(symbol) DO UPDATE SET entry_ts=excluded.entry_ts, entry_price=excluded.entry_price, "
+                "amount=excluded.amount, tx_hash=excluded.tx_hash, stop_price=excluded.stop_price, "
+                "take_price=excluded.take_price, open=1",
+                (symbol, ts, entry_price, amount, tx_hash, stop_price, take_price),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
         logger.info("Position opened: %s @ %.4f x %.4f", symbol, entry_price, amount)
 
     async def close_position(self, symbol: str, exit_price: float, exit_tx_hash: str) -> dict[str, Any]:
@@ -224,10 +237,15 @@ class Portfolio:
         pnl = (exit_price - entry_price) * amount
         pnl_pct = (exit_price - entry_price) / entry_price if entry_price else 0
 
-        await db.execute(
-            "UPDATE positions SET open=0 WHERE symbol=? AND open=1", (symbol,)
-        )
-        await db.commit()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await db.execute(
+                "UPDATE positions SET open=0 WHERE symbol=? AND open=1", (symbol,)
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
         logger.info("Position closed: %s pnl=%.2f (%.2f%%)", symbol, pnl, pnl_pct * 100)
         return {
             "symbol": symbol,
@@ -252,20 +270,25 @@ class Portfolio:
         ) as cur:
             row = await cur.fetchone()
         ts = datetime.now(timezone.utc).isoformat()
-        if row:
-            total = amount_usd + (row[2] or 0.0)
-            peak = max(row[3] or total, total)
-            await db.execute(
-                "UPDATE portfolio_snapshots SET cash_value=?, total_value=?, peak_value=? WHERE id=?",
-                (amount_usd, total, peak, row[0]),
-            )
-        else:
-            await db.execute(
-                "INSERT INTO portfolio_snapshots(ts, total_value, cash_value, positions_value, peak_value) "
-                "VALUES(?,?,?,?,?)",
-                (ts, amount_usd, amount_usd, 0.0, amount_usd),
-            )
-        await db.commit()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            if row:
+                total = amount_usd + (row[2] or 0.0)
+                peak = max(row[3] or total, total)
+                await db.execute(
+                    "UPDATE portfolio_snapshots SET cash_value=?, total_value=?, peak_value=? WHERE id=?",
+                    (amount_usd, total, peak, row[0]),
+                )
+            else:
+                await db.execute(
+                    "INSERT INTO portfolio_snapshots(ts, total_value, cash_value, positions_value, peak_value) "
+                    "VALUES(?,?,?,?,?)",
+                    (ts, amount_usd, amount_usd, 0.0, amount_usd),
+                )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
         logger.debug("Cash updated to %.2f", amount_usd)
 
     async def compute_value(
@@ -296,12 +319,17 @@ class Portfolio:
 
         # Record snapshot
         ts = datetime.now(timezone.utc).isoformat()
-        await db.execute(
-            "INSERT INTO portfolio_snapshots(ts, total_value, cash_value, positions_value, peak_value) "
-            "VALUES(?,?,?,?,?)",
-            (ts, total, cash_usd, positions_value, peak),
-        )
-        await db.commit()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await db.execute(
+                "INSERT INTO portfolio_snapshots(ts, total_value, cash_value, positions_value, peak_value) "
+                "VALUES(?,?,?,?,?)",
+                (ts, total, cash_usd, positions_value, peak),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
         return {
             "total": total,

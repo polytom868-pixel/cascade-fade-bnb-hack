@@ -1,7 +1,7 @@
 import logging
 import statistics
 from typing import Dict, List, Tuple, Any
-from src.config import CASH_CURRENCY, HEARTBEAT_SIZE_USD
+from src.config import CASH_CURRENCY, HEARTBEAT_SIZE_USD, NARRATIVE_BASKETS
 from src.cmc_client import CMCClient
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,11 @@ def detect_market_regime(bnb_dominance: float, fear_greed: float, mcap_change_7d
 # ---------------------------------------------------------------------------
 # 2. 5-Bucket Scoring (per narrative)
 # ---------------------------------------------------------------------------
+TOKEN_TO_NARRATIVE: dict[str, str] = {
+    token: narrative
+    for narrative, tokens in NARRATIVE_BASKETS.items()
+    for token in tokens
+}
 BUCKET_WEIGHTS = {"momentum": 0.30, "liquidity": 0.25, "attention": 0.20, "fundamental": 0.15, "risk": 0.10}
 
 
@@ -132,6 +137,7 @@ def compute_narrative_score(narrative: str, data: dict, regime: str, conviction_
     a_score, a_reasons = score_attention(data)
     f_score, f_reasons = score_fundamental(narrative, data)
     r_score, r_reasons = score_risk_adjustment(narrative, data)
+    exhaustion_score = compute_exhaustion_score(narrative, data)[0]
 
     raw_score = (
         BUCKET_WEIGHTS["momentum"] * m_score +
@@ -170,7 +176,7 @@ def compute_narrative_score(narrative: str, data: dict, regime: str, conviction_
         "conviction": adjusted,
         "cap": cap,
         "bucket_scores": {"momentum": m_score, "liquidity": l_score, "attention": a_score, "fundamental": f_score, "risk": r_score},
-        "exhaustion_score": compute_exhaustion_score(narrative, data)[0],
+        "exhaustion_score": exhaustion_score,
         "reasons": all_reasons,
     }
 
@@ -184,7 +190,8 @@ def global_scan(regime: str, narrative_data: dict, conviction_history: dict = No
     MIN_THRESHOLD = 20
     qualified = {n: max(d["conviction"], 1) for n, d in ranked if d["conviction"] >= MIN_THRESHOLD}
     sum_sq = sum(v ** 2 for v in qualified.values())
-    weights = {n: round((qualified[n] ** 2 / sum_sq) * 100, 1) if n in qualified else 0.0 for n, _ in ranked}
+    weights = {n: round((qualified[n] ** 2 / sum_sq) * 100, 1) for n in qualified}
+    weights.update({n: 0.0 for n, d in ranked if d["conviction"] < MIN_THRESHOLD})
 
     for n in weights:
         weights[n] = min(weights[n], 35.0)
@@ -237,7 +244,9 @@ class SignalEngineClass:
         for narrative, tokens in NARRATIVE_BASKETS.items():
             basket_data = [qs.get(t, {}) for t in tokens]
             avg_price = sum(b.get("price", 0) for b in basket_data) / max(len(basket_data), 1)
-            vol_change = max((b.get("volume_24h", 0) for b in basket_data), default=0)
+            volumes = [b.get("volume_24h", 0) for b in basket_data]
+            max_vol = max(volumes) if volumes else 0
+            vol_change = max_vol
             mcap_change = statistics.mean((b.get("percent_change_24h", 0) for b in basket_data)) if basket_data else 0
             data[narrative] = {
                 "basket_return_7d_pct": mcap_change / 100 if mcap_change else 0,

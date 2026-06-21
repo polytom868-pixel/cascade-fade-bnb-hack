@@ -2,6 +2,8 @@
 import os
 from pathlib import Path
 
+CACHE_TTL_SECONDS = 1800  # match trade interval
+
 # ── Base paths ──────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 LOGS_DIR = PROJECT_ROOT / "logs"
@@ -137,4 +139,4 @@ NARRATIVE_BASKETS = {
 CMC_SYMBOL_TO_ID: dict[str, int] = {}
 
 # Aliases for backward compatibility
-ALLOWLIST_TO_TOKEN_ADDRESS = ALLOWLIST
+ALLOWLIST_TO_TOKEN_ADDRESS = ALLOWLIST.copy()

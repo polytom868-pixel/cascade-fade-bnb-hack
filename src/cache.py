@@ -8,7 +8,7 @@ import aiosqlite
 from src.config import DB_PATH
 from src.utils import ensure_db
 
-CACHE_TTL_SECONDS = 300  # 5 minutes
+CACHE_TTL_SECONDS = 1800  # 30 minutes
 
 
 class Cache:
@@ -27,7 +27,9 @@ class Cache:
             await self._db.execute("PRAGMA foreign_keys=ON")
             await self._db.execute("PRAGMA temp_store=MEMORY")
             await self._db.execute("PRAGMA cache_size=10000")
+            await self._db.execute("PRAGMA busy_timeout=30000")
             await self._init_schema()
+            await self._gc_expired()
         return self._db
 
     async def _init_schema(self) -> None:
@@ -51,6 +53,7 @@ class Cache:
         );
         """
         await db.executescript(sql)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_cmc_quotes_symbol_ts ON cmc_quotes(symbol, ts)")
         await db.commit()
 
     async def get_quote(self, symbol: str) -> dict[str, Any] | None:
@@ -67,12 +70,17 @@ class Cache:
     async def set_quote(self, symbol: str, data: dict[str, Any]) -> None:
         db = await self._connect()
         ts = datetime.now(timezone.utc).isoformat()
-        await db.execute(
-            "INSERT INTO cmc_quotes(symbol, data, ts) VALUES(?,?,?) "
-            "ON CONFLICT(symbol) DO UPDATE SET data=excluded.data, ts=excluded.ts",
-            (symbol, json.dumps(data), ts),
-        )
-        await db.commit()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await db.execute(
+                "INSERT INTO cmc_quotes(symbol, data, ts) VALUES(?,?,?) "
+                "ON CONFLICT(symbol) DO UPDATE SET data=excluded.data, ts=excluded.ts",
+                (symbol, json.dumps(data), ts),
+            )
+            await db.commit()
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
 
     async def get_trending(self) -> list[dict[str, Any]] | None:
         db = await self._connect()
@@ -88,10 +96,15 @@ class Cache:
     async def set_trending(self, data: list[dict[str, Any]]) -> None:
         db = await self._connect()
         ts = datetime.now(timezone.utc).isoformat()
-        await db.execute(
-            "INSERT INTO cmc_trending(data, ts) VALUES(?,?)", (json.dumps(data), ts)
-        )
-        await db.commit()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await db.execute(
+                "INSERT INTO cmc_trending(data, ts) VALUES(?,?)", (json.dumps(data), ts)
+            )
+            await db.commit()
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
 
     async def get_fear_greed(self) -> dict[str, Any] | None:
         db = await self._connect()
@@ -108,10 +121,23 @@ class Cache:
     async def set_fear_greed(self, value: float, classification: str) -> None:
         db = await self._connect()
         ts = datetime.now(timezone.utc).isoformat()
-        await db.execute(
-            "INSERT INTO cmc_fear_greed(value, classification, ts) VALUES(?,?,?)",
-            (value, classification, ts),
-        )
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await db.execute(
+                "INSERT INTO cmc_fear_greed(value, classification, ts) VALUES(?,?,?)",
+                (value, classification, ts),
+            )
+            await db.commit()
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
+
+    async def _gc_expired(self) -> None:
+        db = await self._connect()
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=CACHE_TTL_SECONDS)).isoformat()
+        await db.execute("DELETE FROM cmc_quotes WHERE ts < ?", (cutoff,))
+        await db.execute("DELETE FROM cmc_trending WHERE ts < ?", (cutoff,))
+        await db.execute("DELETE FROM cmc_fear_greed WHERE ts < ?", (cutoff,))
         await db.commit()
 
     async def close(self) -> None:
