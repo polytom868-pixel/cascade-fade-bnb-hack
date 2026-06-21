@@ -265,7 +265,7 @@ class Agent:
         # already removed the position).
         positions = await self.portfolio.get_positions()
         pos = next((p for p in positions if p["symbol"] == sym), None)
-        units = pos["amount"] if pos else 0.0
+        units = pos["units"] if pos else 0.0
         try:
             if self.mode != "paper":
                 result = await self.twak.swap(units, sym, CASH_CURRENCY, slippage=0.5)

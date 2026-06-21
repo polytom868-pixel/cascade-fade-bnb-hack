@@ -28,7 +28,7 @@ def _sum_position_values(positions: list[dict], price_map: dict) -> float:
         sym = pos["symbol"]
         quote = price_map.get(sym, {})
         price = quote.get("price", 0.0) or 0.0
-        total += pos["amount"] * price
+        total += pos["units"] * price
     return total
 
 logger = logging.getLogger("cascadefade.portfolio")
