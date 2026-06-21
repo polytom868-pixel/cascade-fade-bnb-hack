@@ -11,6 +11,7 @@ from src.config import (
     MAX_POSITIONS,
     MAX_SLIPPAGE_PCT,
     PORTFOLIO_FLOOR_USD,
+    STOP_LOSS_PCT,
     ALLOWLIST,
 )
 from src.portfolio import Portfolio
@@ -23,6 +24,7 @@ class RiskGuard:
 
     def __init__(self, portfolio: Portfolio) -> None:
         self.portfolio = portfolio
+        self.stop_loss_pct = STOP_LOSS_PCT
 
     async def check_drawdown(self, value: dict[str, Any]) -> dict[str, Any]:
         """Check if portfolio drawdown exceeds 25% hard stop.
@@ -169,3 +171,42 @@ class RiskGuard:
         if has_bnb:
             return ("BNB", "USDT")
         return ("USDT", "BNB")
+
+    async def check_exits(
+        self,
+        positions: dict[str, dict[str, Any]],
+        price_map: dict[str, dict[str, Any]],
+        value: dict[str, Any],
+    ) -> list[str]:
+        """Check for positions that should be exited due to drawdown.
+
+        First checks global portfolio drawdown, then checks per-position
+        stop-loss based on entry price vs current price.
+
+        Returns: list of token symbols to sell (no duplicates).
+        """
+        # Global drawdown check
+        dd_result = await self.check_drawdown(value)
+        if not dd_result["safe"]:
+            logger.warning("Global drawdown kill triggered, exiting all positions")
+            return list(positions.keys())
+
+        # Per-position stop-loss check
+        forced_sells: list[str] = []
+        for token, pos in positions.items():
+            entry = pos.get("entry_price", 0.0)
+            current = price_map.get(token, {}).get("price") or 0.0
+            if current > 0 and entry > 0:
+                pct = (current - entry) / entry
+                if pct <= -self.stop_loss_pct:
+                    logger.warning(
+                        "Position drawdown stop-loss: %s price=%.4f <= entry=%.4f (%.2f%%)",
+                        token,
+                        current,
+                        entry,
+                        pct * 100,
+                    )
+                    forced_sells.append(token)
+
+        # Deduplicate
+        return list(set(forced_sells))

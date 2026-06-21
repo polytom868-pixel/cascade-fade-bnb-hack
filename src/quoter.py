@@ -89,8 +89,9 @@ DECIMALS = {
 class Quoter:
     """Query PancakeSwap V3 QuoterV2 for expected swap output."""
 
-    def __init__(self, rpc_url: str = BSC_RPC_URL) -> None:
+    def __init__(self, rpc_url: str = BSC_RPC_URL, wallet_address: str | None = None) -> None:
         self.w3 = Web3(Web3.HTTPProvider(rpc_url))
+        self.wallet_address = wallet_address
         if not self.w3.is_connected():
             logger.error("Cannot connect to BSC RPC: %s", rpc_url)
         self.quoter = self.w3.eth.contract(address=Web3.to_checksum_address(PCS_V3_QUOTER_V2), abi=QUOTER_V2_ABI)
@@ -103,6 +104,7 @@ class Quoter:
         from_addr: str | None = None,
         to_addr: str | None = None,
         price_map: dict[str, dict[str, Any]] | None = None,
+        timeout: int = 30,
     ) -> dict[str, Any]:
         """Estimate output for a single pool swap across all fee tiers.
 
@@ -141,9 +143,11 @@ class Quoter:
                     "amountIn": amount_in_wei,
                     "sqrtPriceLimitX96": 0,
                 }
-                result = await asyncio.to_thread(
-                    self.quoter.functions.quoteExactInputSingle(params).call
-                )
+                def _call_quoter(p: dict) -> list:
+                    call_kwargs = {"from": self.wallet_address} if self.wallet_address else {}
+                    return self.quoter.functions.quoteExactInputSingle(p).call(call_kwargs, timeout=15)
+
+                result = await asyncio.to_thread(_call_quoter, params)
                 amount_out_wei = result[0]
                 to_decimals = DECIMALS.get(to_symbol.upper(), 18)
                 amount_out = amount_out_wei / (10 ** to_decimals)

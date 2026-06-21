@@ -4,6 +4,7 @@ import atexit
 import logging
 import os
 import time
+import warnings
 from typing import Any
 
 import aiohttp
@@ -30,7 +31,12 @@ class CMCClient:
     def __init__(self, api_key: str | None = None) -> None:
         self.api_key = api_key or os.getenv("CMC_API_KEY", "")
         if not self.api_key:
-            logger.warning("CMC_API_KEY not set — CMC calls will fail")
+            logger.warning("CMC_API_KEY not set - CMC calls will fail")
+        self._headers = {
+            "Accept": "application/json",
+            "X-CMC_PRO_API_KEY": self.api_key,
+            "Accept-Encoding": "gzip",
+        }
         self._session: aiohttp.ClientSession | None = None
         self._semaphore = asyncio.Semaphore(5)  # limit concurrent requests
         self._last_success: float = 0.0
@@ -40,11 +46,7 @@ class CMCClient:
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
-                headers={
-                    "Accept": "application/json",
-                    "Accept-Encoding": "gzip, deflate",
-                    "X-CMC_PRO_API_KEY": self.api_key,
-                },
+                headers=self._headers,
                 timeout=aiohttp.ClientTimeout(total=CMC_TIMEOUT),
             )
         return self._session
@@ -98,19 +100,47 @@ class CMCClient:
         if symbols:
             params["symbol"] = ",".join(symbols)
 
-        try:
-            data = await self._request("GET", CMC_QUOTES_LATEST, params=params)
-            result: dict[str, dict[str, Any]] = {}
-            for sym in symbol_map:
-                result[sym] = self._extract_quote(data, sym)
-            self._cached_result = result
-            self._last_success = time.monotonic()
-            return result
-        except Exception:
-            if self._cached_result and (time.monotonic() - self._last_success) < CACHE_TTL_SECONDS:
-                logger.warning("CMC fetch failed, returning stale cached data")
-                return self._cached_result
-            raise
+        # Session reuse: create session if needed
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=CMC_TIMEOUT))
+
+        url = f"{CMC_BASE_URL}{CMC_QUOTES_LATEST}"
+
+        # Retry logic with exponential backoff
+        last_error: Exception | None = None
+        for attempt in range(CMC_RETRIES):
+            try:
+                async with self._session.get(url, params=params, headers=self._headers) as resp:
+                    data = await resp.json()
+                    if resp.status == 429:
+                        retry_after = int(resp.headers.get("Retry-After", 60))
+                        logger.warning("CMC rate limited, retry after %ds", retry_after)
+                        raise asyncio.TimeoutError(f"Rate limited, retry after {retry_after}s")
+                    if resp.status != 200:
+                        raise RuntimeError(f"CMC {resp.status}: {data.get('status', {}).get('error_message', 'unknown error')}")
+                    result: dict[str, dict[str, Any]] = {}
+                    for sym in symbol_map:
+                        result[sym] = self._extract_quote(data, sym)
+                    self._cached_result = result
+                    self._last_success = time.monotonic()
+                    return result
+            except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as e:
+                last_error = e
+                if attempt < CMC_RETRIES - 1:
+                    await asyncio.sleep(CMC_RETRY_BACKOFF * (2 ** attempt))
+                    # Recreate session on error for fresh connection
+                    if self._session.closed:
+                        self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=CMC_TIMEOUT))
+                else:
+                    logger.error("CMC fetch failed after %d attempts: %s", CMC_RETRIES, e)
+
+        # Fallback to cached data if available
+        if self._cached_result and (time.monotonic() - self._last_success) < CACHE_TTL_SECONDS:
+            logger.warning("CMC fetch failed, returning stale cached data")
+            return self._cached_result
+        if last_error:
+            raise last_error
+        raise RuntimeError("CMC fetch failed with unknown error")
 
     def _extract_quote(self, data: dict[str, Any], symbol: str) -> dict[str, Any]:
         status = data.get("status", {})
@@ -170,12 +200,20 @@ class CMCClient:
             await self._session.close()
             self._session = None
 
+    def __del__(self) -> None:
+        """Warn if session was not explicitly closed."""
+        if self._session and not self._session.closed:
+            warnings.warn(
+                "CMCClient session not closed! Call await client.close() explicitly.",
+                ResourceWarning,
+            )
+
     def _sync_close(self) -> None:
-        """Synchronous cleanup for atexit — only closes if loop is not running."""
+        """Synchronous cleanup for atexit - only closes if loop is not running."""
         if self._session and not self._session.closed:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                # No running loop — safe to close synchronously
+                # No running loop - safe to close synchronously
                 asyncio.run(self.close())
             # else: loop is running; close() must be called explicitly

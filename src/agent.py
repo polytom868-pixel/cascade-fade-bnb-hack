@@ -201,7 +201,10 @@ class Agent:
         # Execute forced sells (stop-loss / take-profit) in parallel
         if forced_sells:
             sell_tasks = [self._execute_sell(sell, price_map) for sell in forced_sells]
-            await asyncio.gather(*sell_tasks, return_exceptions=True)
+            results = await asyncio.gather(*sell_tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, Exception):
+                    logger.warning("Gather exception: %s", r)
 
         # Prepend forced sells to the decision's sell actions
         if forced_sells:
