@@ -56,9 +56,10 @@ class TWAKExecutor:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                text=True,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            stdout = stdout_b.decode() if stdout_b else ""
+            stderr = stderr_b.decode() if stderr_b else ""
 
             result: dict[str, Any] = {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr}
 
