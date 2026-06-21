@@ -23,7 +23,7 @@ from src.config import (
     TAKE_PROFIT_PCT,
     NARRATIVE_BASKETS,
 )
-from src.decision import CASH_CURRENCY, RISK_CURRENCY
+from src.config import CASH_CURRENCY, RISK_CURRENCY
 from src.decision import DecisionEngine
 from src.log import TradeLogger
 from src.portfolio import Portfolio
@@ -76,13 +76,6 @@ class Agent:
         self._start_ts = datetime.now(timezone.utc)
         self._cycle_count = 0
 
-        # Instance-level SIGINT handler
-        def _handle_sigint(sig_num: int, _frame: Any) -> None:
-            logger.warning("SIGINT received — requesting graceful shutdown...")
-            _shutdown_requested.set()
-
-        signal.signal(signal.SIGINT, _handle_sigint)
-
     async def setup(self) -> None:
         """Initialize portfolio and verify CMC / TWAK connectivity."""
         setup_logging(os.getenv("LOG_LEVEL", "INFO"))
@@ -123,6 +116,7 @@ class Agent:
 
         # WAL checkpoint to reduce DB file size on startup
         db = await self.portfolio._connect()
+        await db.commit()  # ensure initialize_cash writes are flushed
         await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         await db.commit()
 
@@ -267,8 +261,11 @@ class Agent:
         """Execute a single forced sell (stop-loss or take-profit)."""
         sym = sell["token"]
         price = sell["price"]
-        pos = self.portfolio.positions.get(sym)
-        units = pos["units"] if pos else 0.0
+        # Read from DB to avoid stale in-memory dict (decision.py may have
+        # already removed the position).
+        positions = await self.portfolio.get_positions()
+        pos = next((p for p in positions if p["symbol"] == sym), None)
+        units = pos["amount"] if pos else 0.0
         try:
             if self.mode != "paper":
                 result = await self.twak.swap(units, sym, CASH_CURRENCY, slippage=0.5)
@@ -301,6 +298,7 @@ class Agent:
 
 
 def main() -> None:
+    assert sys.version_info >= (3, 11), "Python 3.11+ required for asyncio.timeout"
     import argparse
     parser = argparse.ArgumentParser(description="CascadeFade Trading Agent")
     parser.add_argument("--mode", choices=["paper", "live"], default=os.getenv("AGENT_MODE", "paper"),

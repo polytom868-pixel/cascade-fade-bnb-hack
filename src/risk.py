@@ -82,9 +82,12 @@ class RiskGuard:
         """Alias for check_drawdown — used by decision.py.
 
         Returns (ok, message) tuple matching what decision.py expects.
-        Drawdown is inferred as (peak - current) / peak using the provided portfolio_value.
+        Drawdown is inferred as (peak - current) / peak from DB.
         """
-        peak_value = getattr(self.portfolio, "peak_value", portfolio_value)
+        db = await self.portfolio._connect()
+        async with db.execute("SELECT MAX(peak_value) FROM portfolio_snapshots") as cur:
+            row = await cur.fetchone()
+        peak_value = row[0] if row and row[0] is not None else portfolio_value
         drawdown_pct = max(0.0, (peak_value - portfolio_value) / peak_value) if peak_value > 0 else 0.0
         result = await self.check_drawdown({"drawdown_pct": drawdown_pct})
         if result["safe"]:

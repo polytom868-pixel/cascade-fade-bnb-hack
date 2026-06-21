@@ -56,12 +56,18 @@ class TWAKExecutor:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                text=True,
             )
-            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            stdout = stdout_b.decode("utf-8", errors="replace")
-            stderr = stderr_b.decode("utf-8", errors="replace")
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
             result: dict[str, Any] = {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr}
+
+            if proc.returncode != 0:
+                err_msg = stderr[:500] if stderr else "twak command failed"
+                result["data"] = None
+                result["error"] = err_msg
+                logger.error("TWAK failed (rc=%d): %s", proc.returncode, err_msg)
+                return result
 
             # Try JSON parsing first
             if stdout.strip():
@@ -77,13 +83,7 @@ class TWAKExecutor:
                     else:
                         result["data"] = {"raw": stdout[:500]}
 
-            if proc.returncode != 0:
-                err_msg = stderr[:500] if stderr else "twak command failed"
-                result["error"] = err_msg
-                logger.error("TWAK failed (rc=%d): %s", proc.returncode, err_msg)
-            else:
-                logger.info("TWAK success")
-
+            logger.info("TWAK success")
             return result
 
         except asyncio.TimeoutError:
@@ -118,7 +118,7 @@ class TWAKExecutor:
             slippage=slippage,
             quote_only=quote_only,
         )
-        return await self._run(cmd, timeout=120)
+        return await self._run(cmd, timeout=300)
 
     async def get_balance(self, token: str | None = None) -> dict[str, Any]:
         """Get wallet balance. If token is None, returns BNB + all token balances."""
@@ -130,7 +130,8 @@ class TWAKExecutor:
 
     async def get_address(self) -> str | None:
         """Get the agent wallet address."""
-        result = await self._run(["twak", "wallet", "address", "--json"], timeout=60)
+        cmd = self._build_cmd(["wallet", "address"], json_output=True)
+        result = await self._run(cmd, timeout=60)
         data = result.get("data", {})
         if isinstance(data, dict):
             return data.get("address") or data.get("wallet_address")

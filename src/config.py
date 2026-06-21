@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 
-from src.db_base import WAL_AUTOCHECKPOINT  # noqa: E402
+from src.db_base import WAL_AUTOCHECKPOINT  # noqa: E402  # db_base has no circular dep; imported first for WAL_AUTOCHECKPOINT
 
 CACHE_TTL_SECONDS = 1800  # match trade interval
 

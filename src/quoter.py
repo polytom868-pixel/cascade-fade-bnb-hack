@@ -92,7 +92,8 @@ class Quoter:
     def __init__(self, rpc_url: str = BSC_RPC_URL, wallet_address: str | None = None) -> None:
         self.w3 = Web3(Web3.HTTPProvider(rpc_url))
         self.wallet_address = wallet_address
-        if not self.w3.is_connected():
+        self._connected = self.w3.is_connected()
+        if not self._connected:
             logger.error("Cannot connect to BSC RPC: %s", rpc_url)
         self.quoter = self.w3.eth.contract(address=Web3.to_checksum_address(PCS_V3_QUOTER_V2), abi=QUOTER_V2_ABI)
 
@@ -114,59 +115,75 @@ class Quoter:
 
         Returns best {amount_out, fee_tier, slippage_pct, status}.
         """
+        if not self._connected:
+            return {"error": "RPC not connected", "slippage_pct": 1.0, "status": "rpc_error"}
         if not from_addr or not to_addr:
-            return {"error": "Missing token addresses for quote", "slippage_pct": 1.0}
+            return {"error": "Missing token addresses for quote", "slippage_pct": 1.0, "status": "missing_addresses"}
 
         from_decimals = DECIMALS.get(from_symbol.upper(), 18)
         amount_in_wei = int(amount_in * (10 ** from_decimals))
 
+        if amount_in_wei == 0:
+            logger.warning("quote: amount_in is 0 for %s→%s", from_symbol, to_symbol)
+            return {"error": "amount_in is zero", "slippage_pct": 1.0, "status": "zero_input"}
+
         best = {"amount_out": 0, "fee_tier": 0, "slippage_pct": 1.0, "status": "no_liquidity"}
 
         # Compute USD-equivalent ideal output so slippage baseline is currency-agnostic
+        _has_price_data = False
+        ideal_out: float | None = None
         if price_map:
             from_price = price_map.get(from_symbol.upper(), {}).get("price")
             to_price = price_map.get(to_symbol.upper(), {}).get("price")
             if from_price and to_price and from_price > 0 and to_price > 0:
                 ideal_out_usd = amount_in * from_price          # USD value of what we're spending
                 ideal_out = ideal_out_usd / to_price             # expected output in to_token units
-            else:
-                ideal_out = amount_in  # fallback: equal-value assumption
-        else:
-            ideal_out = amount_in      # fallback: no price data available
+                _has_price_data = True
+
+        from_addr_cs = Web3.to_checksum_address(from_addr)
+        to_addr_cs = Web3.to_checksum_address(to_addr)
 
         for fee in PCS_FEE_TIERS:
             try:
                 params = {
-                    "tokenIn": from_addr,
-                    "tokenOut": to_addr,
+                    "tokenIn": from_addr_cs,
+                    "tokenOut": to_addr_cs,
                     "fee": fee,
                     "amountIn": amount_in_wei,
                     "sqrtPriceLimitX96": 0,
                 }
                 def _call_quoter(p: dict) -> list:
-                    call_kwargs = {"from": self.wallet_address} if self.wallet_address else {}
-                    return self.quoter.functions.quoteExactInputSingle(p).call(call_kwargs, timeout=15)
+                    call_kwargs: dict = {}
+                    if self.wallet_address:
+                        call_kwargs["from"] = Web3.to_checksum_address(self.wallet_address)
+                    # NOTE: web3 ContractFunction.call() does NOT accept a timeout kwarg.
+                    # Timeout is controlled at the provider level or via asyncio.wait_for() outside.
+                    return self.quoter.functions.quoteExactInputSingle(p).call(call_kwargs)
 
-                result = await asyncio.to_thread(_call_quoter, params)
+                result = await asyncio.wait_for(asyncio.to_thread(_call_quoter, params), timeout=15.0)
                 amount_out_wei = result[0]
                 to_decimals = DECIMALS.get(to_symbol.upper(), 18)
                 amount_out = amount_out_wei / (10 ** to_decimals)
 
                 if amount_out > best["amount_out"]:
                     # Slippage = (expected_usd_value - actual_usd_value) / expected_usd_value
-                    if ideal_out > 0:
+                    if _has_price_data and ideal_out is not None and ideal_out > 0:
                         slippage = max(0.0, (ideal_out - amount_out) / ideal_out)
                     else:
-                        slippage = 0.0
+                        slippage = None
                     best = {
                         "amount_out": amount_out,
                         "fee_tier": fee,
                         "slippage_pct": slippage,
-                        "status": "ok",
+                        "status": "ok" if slippage is not None else "no_price_data",
                     }
+
             except Exception as exc:
                 logger.debug("Quoter failed for %s→%s fee=%d: %s", from_symbol, to_symbol, fee, exc)
                 continue
+
+        if best["amount_out"] == 0:
+            best["status"] = "no_liquidity"
 
         logger.info(
             "Quote %s %.4f → %s: best fee=%d, out=%.4f, slippage=%.4f%%",

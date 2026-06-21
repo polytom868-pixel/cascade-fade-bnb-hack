@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import aiosqlite
+from typing import Sequence
 
 from src.config import DB_PATH, HEARTBEAT_SIZE_USD, MAX_POSITION_PCT
 from src.utils import ensure_db, retry_async
@@ -46,6 +47,8 @@ class Portfolio:
     async def _connect(self) -> aiosqlite.Connection:
         new_db = await ensure_db(self._db, self.db_path)
         if new_db is not self._db:
+            if self._db is not None:
+                await self._db.close()
             self._db = new_db
             await self._db.execute("PRAGMA journal_mode=WAL")
             await self._db.execute("PRAGMA synchronous=NORMAL")
@@ -55,7 +58,7 @@ class Portfolio:
         return new_db
 
     @staticmethod
-    def _row_to_position(r: tuple) -> dict[str, Any]:
+    def _row_to_position(r: aiosqlite.Row) -> dict[str, Any]:
         return {
             "symbol": r[0],
             "entry_ts": r[1],

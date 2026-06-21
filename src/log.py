@@ -121,8 +121,9 @@ class TradeLogger:
                 "INSERT INTO trades(ts, side, symbol, signal_snapshot, mode, status) VALUES(?,?,?,?,?,?)",
                 (ts, "decision", symbol, json.dumps({"signal": signal, "action": action, "reason": reason, "confidence": confidence, "cmc": cmc_data}), "paper", "logged"),
             )
+            row_id = cursor.lastrowid
             await db.commit()
-            return cursor.lastrowid
+            return row_id
         except Exception:
             await db.rollback()
             raise
@@ -150,7 +151,7 @@ class TradeLogger:
 
 
 # Module-level quick log for synchronous code
-def log_trade(side, symbol, units, price, value, tx_hash=None, slippage=0.0):
+def log_trade(side: str, symbol: str, units: float, price: float, value: float, tx_hash: str | None = None, slippage: float = 0.0) -> None:
     """Log a trade synchronously (decision.py uses this)."""
     logger.info("TRADE | %s | %s | units=%.6f | price=%.4f | value=%.2f | tx=%s | slippage=%.2f%%",
                 side, symbol, units, price, value, tx_hash or "", slippage)

@@ -72,7 +72,6 @@ class CMCClient:
                 connector=connector,
                 timeout=timeout,
                 headers=self._headers,
-                auto_decompress=True,
             )
         return self._session
 
@@ -161,7 +160,6 @@ class CMCClient:
                             connector=_build_connector(),
                             timeout=aiohttp.ClientTimeout(total=CMC_TIMEOUT, connect=10),
                             headers=self._headers,
-                            auto_decompress=True,
                         )
                 else:
                     logger.error("CMC fetch failed after %d attempts: %s", CMC_RETRIES, e)
@@ -231,14 +229,6 @@ class CMCClient:
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
-
-    def __del__(self) -> None:
-        """Warn if session was not explicitly closed."""
-        if self._session and not self._session.closed:
-            warnings.warn(
-                "CMCClient session not closed! Call await client.close() explicitly.",
-                ResourceWarning,
-            )
 
     def _sync_close(self) -> None:
         """Synchronous cleanup for atexit - only closes if loop is not running."""

@@ -1,10 +1,7 @@
 import logging
-import statistics
-from typing import Dict, List, Tuple, Any
-from src.config import CASH_CURRENCY, HEARTBEAT_SIZE_USD, NARRATIVE_BASKETS
+from typing import Tuple
+from src.config import ALLOWLIST, NARRATIVE_BASKETS
 from src.cmc_client import CMCClient
-
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -50,91 +47,167 @@ _CONVICTION_DECAY_RATE = 0.10
 def score_momentum(data: dict) -> Tuple[int, list]:
     score, reasons = 0, []
     rs = data.get("relative_strength_vs_bnb_7d", 1.0)
-    if rs > 1.15: score += 35; reasons.append(f"Strong RS vs BNB ({rs:.3f}x)")
-    elif rs > 1.05: score += 20; reasons.append(f"Moderate outperformance ({rs:.3f}x)")
-    elif rs < 0.95: score -= 10; reasons.append(f"Underperforming BNB ({rs:.3f}x)")
+    if rs > 1.15:
+        score += 35
+        reasons.append(f"Strong RS vs BNB ({rs:.3f}x)")
+    elif rs > 1.05:
+        score += 20
+        reasons.append(f"Moderate outperformance ({rs:.3f}x)")
+    elif rs < 0.95:
+        score -= 10
+        reasons.append(f"Underperforming BNB ({rs:.3f}x)")
     ret = data.get("basket_return_7d_pct", 0)
-    if 0.05 < ret < 0.30: score += 25; reasons.append(f"Healthy 7d return ({ret*100:+.1f}%)")
-    elif ret > 0.30: score += 10; reasons.append(f"Extended 7d return ({ret*100:+.1f}%)")
-    elif ret < 0: score -= 10; reasons.append(f"Negative 7d return ({ret*100:+.1f}%)")
+    if 0.05 < ret < 0.30:
+        score += 25
+        reasons.append(f"Healthy 7d return ({ret*100:+.1f}%)")
+    elif ret > 0.30:
+        score += 10
+        reasons.append(f"Extended 7d return ({ret*100:+.1f}%)")
+    elif ret < 0:
+        score -= 10
+        reasons.append(f"Negative 7d return ({ret*100:+.1f}%)")
     dd = data.get("drawdown_from_30d_high_pct", 0)
-    if 0.10 < dd < 0.25: score += 15; reasons.append(f"Pullback from 30d high ({dd*100:.0f}%)")
+    if 0.10 < dd < 0.25:
+        score += 15
+        reasons.append(f"Pullback from 30d high ({dd*100:.0f}%)")
     rsi = data.get("rsi_14", 50)
-    if rsi < 35: score += 20; reasons.append(f"RSI oversold ({rsi})")
-    elif rsi > 70: score -= 15; reasons.append(f"RSI overbought ({rsi})")
+    if rsi < 35:
+        score += 20
+        reasons.append(f"RSI oversold ({rsi})")
+    elif rsi > 70:
+        score -= 15
+        reasons.append(f"RSI overbought ({rsi})")
     return max(0, min(100, score)), reasons
 
 
 def score_liquidity(data: dict) -> Tuple[int, list]:
     score, reasons = 0, []
     vol = data.get("volume_change_7d_pct", 0)
-    if vol > 0.30: score += 30; reasons.append(f"Volume expanding rapidly ({vol*100:.0f}% WoW)")
-    elif vol > 0.10: score += 20; reasons.append(f"Healthy volume growth ({vol*100:.0f}% WoW)")
-    elif vol < 0: score -= 15; reasons.append(f"Volume declining ({vol*100:.0f}% WoW)")
+    if vol > 0.30:
+        score += 30
+        reasons.append(f"Volume expanding rapidly ({vol*100:.0f}% WoW)")
+    elif vol > 0.10:
+        score += 20
+        reasons.append(f"Healthy volume growth ({vol*100:.0f}% WoW)")
+    elif vol < 0:
+        score -= 15
+        reasons.append(f"Volume declining ({vol*100:.0f}% WoW)")
     liq = data.get("liquidity_usd", 0)
-    if liq > 50_000_000: score += 20; reasons.append(f"Deep liquidity (${liq/1e6:.0f}M)")
-    elif liq > 20_000_000: score += 10; reasons.append(f"Adequate liquidity (${liq/1e6:.0f}M)")
+    if liq > 50_000_000:
+        score += 20
+        reasons.append(f"Deep liquidity (${liq/1e6:.0f}M)")
+    elif liq > 20_000_000:
+        score += 10
+        reasons.append(f"Adequate liquidity (${liq/1e6:.0f}M)")
     spread = data.get("spread_pct", 0)
-    if spread < 0.3: score += 15; reasons.append(f"Tight spread ({spread:.1f}%)")
-    elif spread > 1.0: score -= 10; reasons.append(f"Wide spread ({spread:.1f}%)")
+    if spread < 0.3:
+        score += 15
+        reasons.append(f"Tight spread ({spread:.1f}%)")
+    elif spread > 1.0:
+        score -= 10
+        reasons.append(f"Wide spread ({spread:.1f}%)")
     return max(0, min(100, score)), reasons
 
 
 def score_attention(data: dict) -> Tuple[int, list]:
     score, reasons = 0, []
-    trending = data.get("trending_rank_avg", 50)
-    if trending <= 10: score += 30; reasons.append(f"High CMC trending (avg #{trending})")
-    elif trending <= 25: score += 20; reasons.append(f"Moderate trending (avg #{trending})")
+    trending = int(data.get("trending_rank_avg") or 50)
+    # Strategy: fade hype — penalize trending tokens, reward overlooked ones
+    if trending <= 10:
+        score -= 30
+        reasons.append(f"CMC trending hype — fading (avg #{trending})")
+    elif trending <= 25:
+        score -= 20
+        reasons.append(f"Moderate trending — caution (avg #{trending})")
+    elif trending >= 40:
+        score += 30
+        reasons.append(f"Ignored / not trending (avg #{trending})")
     social = data.get("social_volume_24h", 0)
-    if social > 10000: score += 25; reasons.append(f"High social velocity ({social:,}/24h)")
-    elif social > 5000: score += 15; reasons.append(f"Moderate social activity ({social:,}/24h)")
-    if data.get("kaito_mindshare_surge"): score += 15; reasons.append("Kaito mindshare surge")
+    if social > 10000:
+        score += 25
+        reasons.append(f"High social velocity ({social:,}/24h)")
+    elif social > 5000:
+        score += 15
+        reasons.append(f"Moderate social activity ({social:,}/24h)")
+    if data.get("kaito_mindshare_surge"):
+        score += 15
+        reasons.append("Kaito mindshare surge")
     return max(0, min(100, score)), reasons
 
 
 def score_fundamental(narrative: str, data: dict) -> Tuple[int, list]:
     score, reasons = 0, []
     if narrative in ("AI Tokens", "AI Agents"):
-        if data.get("github_commits_7d", 0) > 200: score += 25; reasons.append(f"Active dev ({data['github_commits_7d']} commits/7d)")
-        if data.get("developer_growth_30d_pct", 0) > 0.15: score += 20; reasons.append(f"Dev growth ({data['developer_growth_30d_pct']*100:.0f}%)")
-        score += 15; reasons.append("AI structural tailwind")
+        if data.get("github_commits_7d", 0) > 200:
+            score += 25
+            reasons.append(f"Active dev ({data['github_commits_7d']} commits/7d)")
+        if data.get("developer_growth_30d_pct", 0) > 0.15:
+            score += 20
+            reasons.append(f"Dev growth ({data['developer_growth_30d_pct']*100:.0f}%)")
+        score += 15
+        reasons.append("AI structural tailwind")
     elif narrative == "RWA":
-        if data.get("tvl_change_7d_pct", 0) > 0.08: score += 25; reasons.append(f"TVL expanding")
-        if data.get("yield_premium_vs_treasuries_bps", 0) > 100: score += 15; reasons.append("Yield premium")
+        if data.get("tvl_change_7d_pct", 0) > 0.08:
+            score += 25
+            reasons.append("TVL expanding")
+        if data.get("yield_premium_vs_treasuries_bps", 0) > 100:
+            score += 15
+            reasons.append("Yield premium")
     elif narrative == "DePIN":
-        if data.get("active_nodes_7d_growth_pct", 0) > 0.05: score += 25; reasons.append(f"Node growth")
-        if data.get("network_utilization_pct", 0) > 0.5: score += 20; reasons.append(f"Utilization high")
+        if data.get("active_nodes_7d_growth_pct", 0) > 0.05:
+            score += 25
+            reasons.append("Node growth")
+        if data.get("network_utilization_pct", 0) > 0.5:
+            score += 20
+            reasons.append("Utilization high")
     elif narrative == "Meme":
-        if data.get("holder_growth_7d_pct", 0) > 0.1: score += 25; reasons.append(f"Holder growth")
-        if data.get("whale_accumulation_7d_usd", 0) > 200_000: score += 15; reasons.append(f"Whale accumulation")
+        if data.get("holder_growth_7d_pct", 0) > 0.1:
+            score += 25
+            reasons.append("Holder growth")
+        if data.get("whale_accumulation_7d_usd", 0) > 200_000:
+            score += 15
+            reasons.append("Whale accumulation")
     elif narrative == "Privacy":
-        if data.get("mixer_volume_7d_usd", 0) > 20_000_000: score += 25; reasons.append(f"Privacy demand")
-        if data.get("shielded_pool_growth_7d_pct", 0) > 0.1: score += 15; reasons.append(f"Shielded pool growth")
+        if data.get("mixer_volume_7d_usd", 0) > 20_000_000:
+            score += 25
+            reasons.append("Privacy demand")
+        if data.get("shielded_pool_growth_7d_pct", 0) > 0.1:
+            score += 15
+            reasons.append("Shielded pool growth")
     else:
-        score += 10; reasons.append(f"{narrative} baseline utility")
+        score += 10
+        reasons.append(f"{narrative} baseline utility")
     return max(0, min(100, score)), reasons
 
 
 def compute_exhaustion_score(narrative: str, data: dict) -> Tuple[int, list]:
     penalty, reasons = 0, []
     if data.get("basket_return_7d_pct", 0) > 0.40 and data.get("volume_change_7d_pct", 0) < 0:
-        penalty += 25; reasons.append("Parabolic return with declining volume — distribution likely")
+        penalty += 25
+        reasons.append("Parabolic return with declining volume — distribution likely")
     if data.get("social_volume_24h", 0) > 10000 and data.get("holder_growth_7d_pct", 0) < 0.03:
-        penalty += 20; reasons.append("Social hype without holder growth")
+        penalty += 20
+        reasons.append("Social hype without holder growth")
     if data.get("drawdown_from_30d_high_pct", 999) < 0.05 and data.get("volume_change_7d_pct", 0) < 0:
-        penalty += 20; reasons.append("Near 30d high with declining volume")
+        penalty += 20
+        reasons.append("Near 30d high with declining volume")
     if data.get("volatility_30d", 0) > 1.0:
-        penalty += 15; reasons.append(f"Extreme volatility ({data['volatility_30d']*100:.0f}% ann.)")
+        penalty += 15
+        reasons.append(f"Extreme volatility ({data['volatility_30d']*100:.0f}% ann.)")
     return min(penalty, 100), reasons
 
 
 def score_risk_adjustment(narrative: str, data: dict, exhaustion_score: int) -> Tuple[int, list]:
     score, reasons = 100, []
     vol = data.get("volatility_30d", 0)
-    if vol > 1.0: score -= 30; reasons.append(f"Extreme volatility")
-    elif vol > 0.6: score -= 15; reasons.append(f"Elevated volatility")
+    if vol > 1.0:
+        score -= 30
+        reasons.append("Extreme volatility")
+    elif vol > 0.6:
+        score -= 15
+        reasons.append("Elevated volatility")
     rsi_score = data.get("rsi_14", 0.5)
-    if isinstance(rsi_score, (list, tuple, np.ndarray)):
+    if isinstance(rsi_score, (list, tuple)):
         rsi_score = float(rsi_score[0]) if len(rsi_score) > 0 else 0.5
     elif rsi_score is None:
         rsi_score = 0.5
@@ -153,7 +226,9 @@ def score_risk_adjustment(narrative: str, data: dict, exhaustion_score: int) -> 
 
 
 
-def compute_narrative_score(narrative: str, data: dict, regime: str, conviction_history: dict = None, day: int = 0) -> dict:
+def compute_narrative_score(narrative: str, data: dict, regime: str, conviction_history: dict | None = None, day: int = 0) -> dict:
+    if conviction_history is None:
+        conviction_history = {}
     m_score, m_reasons = score_momentum(data)
     l_score, l_reasons = score_liquidity(data)
     a_score, a_reasons = score_attention(data)
@@ -182,12 +257,11 @@ def compute_narrative_score(narrative: str, data: dict, regime: str, conviction_
     adjusted = min(adjusted, cap)
 
     # Conviction decay
-    if conviction_history is not None and narrative in conviction_history:
+    if narrative in conviction_history:
         days_stale = day - conviction_history[narrative].get("last_day", day)
         if days_stale > 1:
             adjusted = int(adjusted * ((1 - _CONVICTION_DECAY_RATE) ** days_stale))
-    if conviction_history is not None:
-        conviction_history[narrative] = {"score": adjusted, "last_day": day}
+    conviction_history[narrative] = {"score": adjusted, "last_day": day}
 
     all_reasons = m_reasons + l_reasons + a_reasons + f_reasons + r_reasons
     verdict = "STRONG_LONG" if adjusted >= 60 else "LONG" if adjusted >= 20 else "NEUTRAL" if adjusted >= 10 else "AVOID"
@@ -203,7 +277,7 @@ def compute_narrative_score(narrative: str, data: dict, regime: str, conviction_
     }
 
 
-def global_scan(regime: str, narrative_data: dict, conviction_history: dict = None, day: int = 0) -> dict:
+def global_scan(regime: str, narrative_data: dict, conviction_history: dict | None = None, day: int = 0) -> dict:
     results = {}
     for narrative, data in narrative_data.items():
         results[narrative] = compute_narrative_score(narrative, data, regime, conviction_history, day)
@@ -237,8 +311,10 @@ def global_scan(regime: str, narrative_data: dict, conviction_history: dict = No
                 "DEFENSIVE — increase stablecoin allocation")
 
     risks = []
-    if regime != "RISK_ON": risks.append(f"Regime is {regime} — reduced allocation")
-    if top[1]["exhaustion_score"] > 30: risks.append(f"{top[0]} exhaustion at {top[1]['exhaustion_score']}/100")
+    if regime != "RISK_ON":
+        risks.append(f"Regime is {regime} — reduced allocation")
+    if top[1]["exhaustion_score"] > 30:
+        risks.append(f"{top[0]} exhaustion at {top[1]['exhaustion_score']}/100")
 
     return {
         "regime": regime,
@@ -261,12 +337,27 @@ class SignalEngineClass:
         self.cmc = cmc_client
         self.conviction_history: dict = {}
         self.day: int = 0
-        # Cache: skip recalc when price unchanged from last cycle
-        self._last_prices: dict[str, float] = {}
-        self._last_scores: dict[str, Any] = {}
+
+    async def _fetch_narrative_data(self) -> dict[str, dict]:
+        """Fetch price and trending data for all baskets."""
+        price_map = await self.cmc.get_bulk_quotes(ALLOWLIST)
+        trending = await self.cmc.get_trending_symbols()
+        fear_greed = await self.cmc.get_fear_greed()
+        return {
+            token: {
+                "price": price_map.get(token, 0.0),
+                "trending": token in trending,
+                "fear_greed": fear_greed,
+            }
+            for token in set(ALLOWLIST + [t for basket in NARRATIVE_BASKETS.values() for t in basket])
+        }
 
     async def evaluate(self) -> dict:
         self.day += 1
-        regime, reason = detect_market_regime(bnb_dominance=45, fear_greed=50, mcap_change_7d=0.02)
         narrative_data = await self._fetch_narrative_data()
+        regime, _ = detect_market_regime(
+            bnb_dominance=narrative_data.get("BNB", {}).get("price", 450) / 10,
+            fear_greed=narrative_data.get("fear_greed", 50),
+            mcap_change_7d=0.0,
+        )
         return global_scan(regime, narrative_data, self.conviction_history, self.day)

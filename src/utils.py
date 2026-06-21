@@ -2,9 +2,11 @@
 import asyncio
 import logging
 import re
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import aiosqlite
+
+from eth_utils import to_checksum_address
 
 logger = logging.getLogger("cascadefade")
 
@@ -21,7 +23,6 @@ def setup_logging(level: str = "INFO") -> None:
 def to_checksum(addr: str) -> str:
     """Return checksummed address if valid, else original."""
     try:
-        from eth_utils import to_checksum_address
         return to_checksum_address(addr)
     except Exception:
         return addr
@@ -64,7 +65,7 @@ def parse_tx_hash_from_stdout(stdout: str) -> str | None:
 
 
 async def retry_async(
-    coro_factory,
+    coro_factory: Callable[[], Awaitable[Any]],
     retries: int = 3,
     backoff: float = 1.5,
     exceptions: tuple[type[Exception], ...] = (Exception,),
