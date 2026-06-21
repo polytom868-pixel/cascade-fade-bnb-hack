@@ -166,19 +166,12 @@ class Portfolio:
         pos = self.positions.get(symbol)
         if not pos:
             return
-        db = await self._connect()
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            await self.add_position(
-                symbol=symbol,
-                entry_price=pos["entry_price"],
-                amount=pos["units"],
-                tx_hash=pos.get("tx_hash") or "",
-            )
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+        await self.add_position(
+            symbol=symbol,
+            entry_price=pos["entry_price"],
+            amount=pos["units"],
+            tx_hash=pos.get("tx_hash") or "",
+        )
 
     async def remove_position_from_db(self, symbol: str) -> None:
         """Remove a position from DB (called async after sell swap)."""
