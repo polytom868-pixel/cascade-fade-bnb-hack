@@ -64,6 +64,7 @@ CMC REST → Signal → Risk → TWAK → PancakeSwap v3 (MEV Guard) → SQLite 
 | PancakeSwap V3 Router | `0x13f4EA83D0bd40E75C8222255bc855a974568Dd4` |
 | QuoterV2 | `0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997` |
 | Competition Registration | `0x212c61b9b72c95d95bf29cf032f5e5635629aed5` |
+| ERC-8004 Identity Registry | `0x8004A169FB4a3325136EB29fA0ceB6D2e539a432` |
 ## Files
 `src/agent.py` `src/config.py` `src/signal.py` `src/decision.py` `src/portfolio.py` `src/risk.py` `src/twak.py` `src/cmc_client.py` `src/quoter.py` `src/cache.py` `src/log.py`
 MIT — BNB Hack Track 1.
