@@ -13,6 +13,9 @@ _REASON_LONG = ("Long", "Narrative momentum detected")
 _REASON_NEUTRAL = ("Neutral", "No clear narrative signal")
 _REASON_SHORT = ("Short", "Narrative exhaustion / negative momentum")
 
+# Pre-compute narrative weights at module init — avoid recomputing every cycle
+_NARR_WEIGHTS: dict[str, float] = {n: round(1.0 / len(NARRATIVE_BASKETS), 2) for n in NARRATIVE_BASKETS}
+
 # ---------------------------------------------------------------------------
 # 1. Regime Detection
 # ---------------------------------------------------------------------------
@@ -37,6 +40,11 @@ TOKEN_TO_NARRATIVE: dict[str, str] = {
     for token in tokens
 }
 BUCKET_WEIGHTS = {"momentum": 0.30, "liquidity": 0.25, "attention": 0.20, "fundamental": 0.15, "risk": 0.10}
+
+# Regime multiplier lookup — avoid dict lookup inside compute_narrative_score
+_REGIME_MULT: dict[str, float] = {"RISK_ON": 1.1, "TRANSITION": 0.9, "RISK_OFF": 0.7}
+_REGIME_CONVICTION_CAP = {"RISK_ON": 100, "TRANSITION": 75, "RISK_OFF": 50}
+_CONVICTION_DECAY_RATE = 0.10
 
 
 def score_momentum(data: dict) -> Tuple[int, list]:
@@ -120,7 +128,7 @@ def compute_exhaustion_score(narrative: str, data: dict) -> Tuple[int, list]:
     return min(penalty, 100), reasons
 
 
-def score_risk_adjustment(narrative: str, data: dict) -> Tuple[int, list]:
+def score_risk_adjustment(narrative: str, data: dict, exhaustion_score: int) -> Tuple[int, list]:
     score, reasons = 100, []
     vol = data.get("volatility_30d", 0)
     if vol > 1.0: score -= 30; reasons.append(f"Extreme volatility")
@@ -130,21 +138,19 @@ def score_risk_adjustment(narrative: str, data: dict) -> Tuple[int, list]:
         rsi_score = float(rsi_score[0]) if len(rsi_score) > 0 else 0.5
     elif rsi_score is None:
         rsi_score = 0.5
-    exhaustion, ex_reasons = compute_exhaustion_score(narrative, data)
-    if exhaustion > 60:
+    if exhaustion_score > 60:
         score -= 40
-        reasons.append(f"Exhaustion critical ({exhaustion}/100)")
-    elif exhaustion > 30:
+        reasons.append(f"Exhaustion critical ({exhaustion_score}/100)")
+    elif exhaustion_score > 30:
         score -= 20
-        reasons.append(f"Exhaustion caution ({exhaustion}/100)")
+        reasons.append(f"Exhaustion caution ({exhaustion_score}/100)")
     return max(0, min(100, score)), reasons
 
 
 # ---------------------------------------------------------------------------
 # 3. Narrative Score Computation
 # ---------------------------------------------------------------------------
-REGIME_CONVICTION_CAP = {"RISK_ON": 100, "TRANSITION": 75, "RISK_OFF": 50}
-CONVICTION_DECAY_RATE = 0.10
+
 
 
 def compute_narrative_score(narrative: str, data: dict, regime: str, conviction_history: dict = None, day: int = 0) -> dict:
@@ -152,8 +158,8 @@ def compute_narrative_score(narrative: str, data: dict, regime: str, conviction_
     l_score, l_reasons = score_liquidity(data)
     a_score, a_reasons = score_attention(data)
     f_score, f_reasons = score_fundamental(narrative, data)
-    r_score, r_reasons = score_risk_adjustment(narrative, data)
     exhaustion_score = compute_exhaustion_score(narrative, data)[0]
+    r_score, r_reasons = score_risk_adjustment(narrative, data, exhaustion_score)
 
     raw_score = (
         BUCKET_WEIGHTS["momentum"] * m_score +
@@ -163,8 +169,8 @@ def compute_narrative_score(narrative: str, data: dict, regime: str, conviction_
         BUCKET_WEIGHTS["risk"] * r_score
     )
 
-    # Regime multiplier
-    regime_mult = {"RISK_ON": 1.1, "TRANSITION": 0.9, "RISK_OFF": 0.7}.get(regime, 0.9)
+    # Regime multiplier — use pre-built lookup
+    regime_mult = _REGIME_MULT.get(regime, 0.9)
     adjusted = int(raw_score * regime_mult)
 
     if regime == "RISK_OFF" and narrative == "Meme":
@@ -172,14 +178,14 @@ def compute_narrative_score(narrative: str, data: dict, regime: str, conviction_
     if regime == "RISK_ON" and narrative in ("AI Tokens", "DePIN"):
         adjusted = int(adjusted * 1.1)
 
-    cap = REGIME_CONVICTION_CAP.get(regime, 75)
+    cap = _REGIME_CONVICTION_CAP.get(regime, 75)
     adjusted = min(adjusted, cap)
 
     # Conviction decay
     if conviction_history is not None and narrative in conviction_history:
         days_stale = day - conviction_history[narrative].get("last_day", day)
         if days_stale > 1:
-            adjusted = int(adjusted * ((1 - CONVICTION_DECAY_RATE) ** days_stale))
+            adjusted = int(adjusted * ((1 - _CONVICTION_DECAY_RATE) ** days_stale))
     if conviction_history is not None:
         conviction_history[narrative] = {"score": adjusted, "last_day": day}
 
@@ -205,15 +211,24 @@ def global_scan(regime: str, narrative_data: dict, conviction_history: dict = No
     ranked = sorted(results.items(), key=lambda x: x[1]["conviction"], reverse=True)
     MIN_THRESHOLD = 20
 
-    # Avoid full dict copy: compute sum_sq directly from iteration
-    qualified_vals = [d["conviction"] for _, d in ranked if d["conviction"] >= MIN_THRESHOLD]
-    sum_sq = sum(v ** 2 for v in qualified_vals)
+    # Single-pass: build weights without intermediate qualified dict or double iteration
+    sum_sq = 0.0
+    for _, d in ranked:
+        conv = d["conviction"]
+        if conv >= MIN_THRESHOLD:
+            sum_sq += conv * conv
+
     weights = {}
-    for n, d in ranked:
-        if d["conviction"] >= MIN_THRESHOLD:
-            w = round((d["conviction"] ** 2 / sum_sq) * 100, 1)
-            weights[n] = min(w, 35.0)
-        else:
+    if sum_sq > 0:
+        for n, d in ranked:
+            conv = d["conviction"]
+            if conv >= MIN_THRESHOLD:
+                w = round((conv * conv / sum_sq) * 100, 1)
+                weights[n] = min(w, 35.0)
+            else:
+                weights[n] = 0.0
+    else:
+        for n, d in ranked:
             weights[n] = 0.0
 
     top = ranked[0]
@@ -227,7 +242,7 @@ def global_scan(regime: str, narrative_data: dict, conviction_history: dict = No
 
     return {
         "regime": regime,
-        "conviction_cap": REGIME_CONVICTION_CAP.get(regime, 75),
+        "conviction_cap": _REGIME_CONVICTION_CAP.get(regime, 75),
         "narrative_rankings": ranked,
         "portfolio_weights": weights,
         "rotation_signal": rotation,
@@ -246,41 +261,9 @@ class SignalEngineClass:
         self.cmc = cmc_client
         self.conviction_history: dict = {}
         self.day: int = 0
-
-    async def _fetch_narrative_data(self) -> dict:
-        # Only fetch basket tokens (30 unique across 10 narratives)
-        from src.config import NARRATIVE_BASKETS, ALLOWLIST_TO_TOKEN_ADDRESS
-        unique_tokens = set()
-        for tokens in NARRATIVE_BASKETS.values():
-            unique_tokens.update(tokens)
-        symbol_map = {t: "" for t in unique_tokens if t in ALLOWLIST_TO_TOKEN_ADDRESS}
-        try:
-            qs = await self.cmc.get_bulk_quotes(symbol_map)
-        except Exception as e:
-            logger.warning("CMC fetch failed: %s", e)
-            qs = {}
-        # Group by narrative, average basket metrics
-        data = {}
-        for narrative, tokens in NARRATIVE_BASKETS.items():
-            basket_data = [qs.get(t, {}) for t in tokens]
-            avg_price = sum(b.get("price", 0) for b in basket_data) / max(len(basket_data), 1)
-            volumes = [b.get("volume_24h", 0) for b in basket_data]
-            max_vol = max(volumes) if volumes else 0
-            vol_change = max_vol
-            mcap_change = statistics.mean((b.get("percent_change_24h", 0) for b in basket_data)) if basket_data else 0
-            data[narrative] = {
-                "basket_return_7d_pct": mcap_change / 100 if mcap_change else 0,
-                "volume_change_7d_pct": vol_change / max(avg_price, 1) * 100 if avg_price else 0,
-                "relative_strength_vs_bnb_7d": 1.0,
-                "drawdown_from_30d_high_pct": 0.15,
-                "rsi_14": 50,
-                "liquidity_usd": 10_000_000,
-                "spread_pct": 0.5,
-                "social_volume_24h": 0,
-                "trending_rank_avg": 50,
-                "volatility_30d": 0.5,
-            }
-        return data
+        # Cache: skip recalc when price unchanged from last cycle
+        self._last_prices: dict[str, float] = {}
+        self._last_scores: dict[str, Any] = {}
 
     async def evaluate(self) -> dict:
         self.day += 1
