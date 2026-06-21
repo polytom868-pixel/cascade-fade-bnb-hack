@@ -51,7 +51,7 @@ class Portfolio:
             await self._db.execute("PRAGMA synchronous=NORMAL")
             await self._db.execute("PRAGMA foreign_keys=ON")
             await self._db.execute("PRAGMA busy_timeout=30000")
-            await self._ensure_schema()
+            await Portfolio._ensure_schema(self._db)
         return new_db
 
     @staticmethod
